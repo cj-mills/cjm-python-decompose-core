@@ -101,8 +101,14 @@ def test_resolve_import_relative_and_absolute():
 def test_corpus_imports_and_calls_resolve_intra_corpus():
     a, b = _corpus()
     nodes, edges = corpus_graph_elements([a, b])
-    # 2 modules + 3 symbols (a) + 1 symbol (b) = 6 nodes.
-    assert len(nodes) == 6
+    by_label: dict = {}
+    for n in nodes:
+        by_label[n["label"]] = by_label.get(n["label"], 0) + 1
+    # 2 modules + 4 symbols (alpha, shared_helper, Thing, Thing.method_one) + the non-def
+    # CodeText regions (imports/constants) now emitted as the verbatim round-trip substrate.
+    assert by_label["CodeModule"] == 2
+    assert by_label["CodeSymbol"] == 4
+    assert by_label.get("CodeText", 0) >= 1
 
     imports = [e for e in edges if e["relation_type"] == DevRelations.IMPORTS]
     # a imports .b -> resolves to module b.

@@ -86,6 +86,7 @@ def corpus_graph_elements(
     for d in decs:
         nodes.append(d.module.to_graph_node())
         nodes.extend(s.to_graph_node() for s in d.symbols)
+        nodes.extend(t.to_graph_node() for t in d.texts)  # non-def verbatim regions (round-trip substrate)
         edges.extend(d.local_edges)
 
         is_pkg = d.module.module_path.endswith("__init__.py")

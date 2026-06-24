@@ -12,9 +12,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from cjm_context_graph_primitives.provenance import SourceRef
-from cjm_dev_graph_schema.nodes import CodeModuleNode, CodeSymbolNode
+from cjm_dev_graph_schema.nodes import (CodeModuleNode, CodeSymbolNode,
+                                        CodeTextNode)
 
-from .parse import ParsedModule, parse_module
+from .parse import (ParsedModule, SourceRegion, emit_regions, parse_module,
+                    parse_regions)
 
 # Directories never decomposed as source (generated / virtualenv / packaging cruft).
 _SKIP_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", "build", "dist", ".eggs"}
@@ -25,11 +27,26 @@ class DecomposedModule:
     """One module bound to schema nodes: the module + its symbols + local edges.
 
     `parsed` is retained so the ingest layer can resolve corpus-level IMPORTS/CALLS
-    (which need every module's import-name / every symbol's name to be known)."""
+    (which need every module's import-name / every symbol's name to be known).
+    `texts` are the non-def verbatim regions (the round-trip substrate between symbols);
+    the module's CONTAINS edges (in `local_edges`) order all top-level regions for emit."""
     module: CodeModuleNode               # The CodeModule node
     symbols: List[CodeSymbolNode]        # All symbols, flattened (every nesting level)
-    local_edges: List[Dict[str, Any]] = field(default_factory=list)  # ABOUT + structural DEFINES edges
+    local_edges: List[Dict[str, Any]] = field(default_factory=list)  # ABOUT + structural DEFINES + CONTAINS edges
     parsed: Optional[ParsedModule] = None  # The raw parse (for corpus IMPORTS/CALLS resolution)
+    texts: List[CodeTextNode] = field(default_factory=list)  # Non-def verbatim regions (imports/docstring/constants/__main__)
+
+
+def _text_region_kind(
+    region: SourceRegion,  # A "text" region
+) -> str:  # Coarse flavor for relevance/render ("imports" | "docstring" | "code")
+    """Classify a non-def text region for display (imports / module docstring / code)."""
+    stripped = region.text.lstrip()
+    if stripped.startswith(("import ", "from ")):
+        return "imports"
+    if stripped.startswith(('"""', "'''", '"', "'")):
+        return "docstring"
+    return "code"
 
 
 def module_path_for(
@@ -105,8 +122,33 @@ def decompose_text(
         docstring=parsed.docstring, imports=list(parsed.imports),
     )
     symbols, defines = _build_symbols(module, parsed, ch, path)
-    return DecomposedModule(module=module, symbols=symbols,
-                            local_edges=[module.about_edge(), *defines], parsed=parsed)
+
+    # Verbatim-region overlay (the authoring / round-trip substrate): attach each
+    # top-level symbol's VERBATIM body + order, mint CodeText nodes for the non-def
+    # regions, and order ALL top-level regions under the module via CONTAINS.
+    top_by_qual = {s.qualname: s for s in symbols if "." not in s.qualname}
+    texts: List[CodeTextNode] = []
+    region_ids: List[str] = []
+    for i, region in enumerate(parse_regions(text)):
+        if region.kind == "symbol":
+            sym = top_by_qual.get(region.qualname)
+            if sym is None:  # defensive: a top-level def with no matching ParsedSymbol (shouldn't happen)
+                continue
+            sym.body = region.text
+            sym.body_hash = SourceRef.compute_hash(region.text.encode("utf-8"))
+            sym.order_index = i
+            region_ids.append(sym.id)
+        else:
+            ct = CodeTextNode(
+                module_id=module.id, region_key=region.region_key, text=region.text,
+                content_hash=SourceRef.compute_hash(region.text.encode("utf-8")),
+                order_index=i, path=path, kind=_text_region_kind(region))
+            texts.append(ct)
+            region_ids.append(ct.id)
+
+    local_edges = [module.about_edge(), *defines, *module.contains_edges(region_ids)]
+    return DecomposedModule(module=module, symbols=symbols, local_edges=local_edges,
+                            parsed=parsed, texts=texts)
 
 
 def decompose_file(

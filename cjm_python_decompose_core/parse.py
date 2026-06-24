@@ -189,3 +189,135 @@ def iter_symbols(
             yield s
             yield from walk(s.children)
     yield from walk(parsed.symbols)
+
+
+# ----------------------------------------------------------------------------- #
+# Verbatim region decomposition (the authoring / round-trip substrate)
+#
+# A module is an ORDERED sequence of top-level regions: each def/class is a
+# "symbol" region carrying its VERBATIM body (decorators + leading comments through
+# the end of the def); each run of contiguous non-def top-level statements (imports,
+# the module docstring, constants, `__all__`, `if __name__`) is a "text" region held
+# verbatim. Blank lines BETWEEN regions are SEAMS — dropped here and regenerated
+# canonically on emit ("the graph owns formatting"). This is the plain-`.py`
+# analogue of a notebook's ordered verbatim cells; bodies are stored verbatim (NOT
+# AST-as-graph — the round-trip trap).
+# ----------------------------------------------------------------------------- #
+
+@dataclass
+class SourceRegion:
+    """One ordered top-level region of a module, held verbatim (symbol or text)."""
+    kind: str               # "symbol" (a def/class) | "text" (a non-def run)
+    text: str               # The region's VERBATIM source (trailing blank lines trimmed; emit re-adds seams)
+    start_line: int         # 1-based first source line of the region
+    end_line: int           # 1-based last source line of the region
+    qualname: str = ""      # Symbol regions: the top-level def/class name (matches the ParsedSymbol)
+    symbol_kind: str = ""   # Symbol regions: "function" | "class"
+    region_key: str = ""    # Text regions: a best-effort stable anchor (the region's leading line)
+
+
+def _toplevel_start(
+    node: ast.stmt,  # A top-level statement node
+) -> int:  # Its first source line, decorator-aware
+    """The first source line of a top-level node, counting decorators above a def."""
+    start = node.lineno
+    for d in getattr(node, "decorator_list", []):
+        start = min(start, d.lineno)
+    return start
+
+
+def _text_region_key(
+    text: str,  # The region's verbatim text
+) -> str:  # A best-effort stable anchor key
+    """A best-effort identity anchor for a text region: its first non-blank line.
+
+    Stable across edits that don't change what the region LEADS with (v1 limitation —
+    symbol identity is the rename-stable one that carries born-on-graph annotations;
+    text-region identity is best-effort, since text regions hold no annotations)."""
+    for line in text.splitlines():
+        s = line.strip()
+        if s:
+            return s[:80]
+    return "region"
+
+
+def parse_regions(
+    text: str,  # Full module source text
+) -> List[SourceRegion]:  # The ordered top-level regions (verbatim), seams excluded
+    """Decompose a module into ordered verbatim top-level regions (the round-trip substrate).
+
+    Def/class nodes become "symbol" regions (verbatim body incl. decorators + the
+    contiguous comment block immediately above); runs of adjacent non-def top-level
+    statements merge into "text" regions. Leading blank lines of each gap are dropped
+    as seams (canonical emit regenerates them); a comment touching the following node
+    attaches to it. Raises `SyntaxError` on unparseable source (caller decides)."""
+    tree = ast.parse(text)
+    lines = text.splitlines(keepends=True)  # 0-based; line L is lines[L-1]
+    n = len(lines)
+
+    def slice_text(start: int, end: int) -> str:  # 1-based inclusive -> verbatim, trailing blanks trimmed
+        return "".join(lines[start - 1:end]).rstrip("\n")
+
+    regions: List[SourceRegion] = []
+    prev_end = 0  # last assigned source line (1-based)
+    for node in tree.body:
+        nstart, nend = _toplevel_start(node), (node.end_lineno or node.lineno)
+        seg_start = prev_end + 1
+        # Drop leading blank lines of the gap (seams); a comment then attaches to this node.
+        while seg_start < nstart and not lines[seg_start - 1].strip():
+            seg_start += 1
+        is_def = isinstance(node, _DEF_TYPES)
+        body = slice_text(seg_start, nend)
+        if is_def:
+            regions.append(SourceRegion(
+                kind="symbol", text=body, start_line=seg_start, end_line=nend,
+                qualname=node.name,
+                symbol_kind="class" if isinstance(node, ast.ClassDef) else "function"))
+        else:
+            # Merge with a directly-adjacent preceding text region (no blank line between),
+            # so an import block / consecutive statements stay ONE region (one seam, not N).
+            if (regions and regions[-1].kind == "text"
+                    and seg_start <= regions[-1].end_line + 1):
+                merged = regions[-1]
+                merged.text = slice_text(merged.start_line, nend)
+                merged.end_line = nend
+            else:
+                regions.append(SourceRegion(
+                    kind="text", text=body, start_line=seg_start, end_line=nend,
+                    region_key=_text_region_key(body)))
+        prev_end = nend
+
+    # Trailing non-blank content after the last node (e.g. a trailing comment) -> a final text region.
+    tail_start = prev_end + 1
+    while tail_start <= n and not lines[tail_start - 1].strip():
+        tail_start += 1
+    if tail_start <= n:
+        tail = slice_text(tail_start, n)
+        regions.append(SourceRegion(kind="text", text=tail, start_line=tail_start,
+                                    end_line=n, region_key=_text_region_key(tail)))
+
+    # An empty / comments-only module has no ast nodes -> one text region holding it all.
+    if not regions and text.strip():
+        whole = text.rstrip("\n")
+        regions.append(SourceRegion(kind="text", text=whole, start_line=1, end_line=n,
+                                    region_key=_text_region_key(whole)))
+    return regions
+
+
+def emit_regions(
+    regions: List[SourceRegion],  # Ordered top-level regions (symbol/text) to reassemble
+) -> str:  # Canonical module source (verbatim bodies + canonical seams)
+    """Reassemble ordered regions into canonical `.py` source — the graph owns formatting.
+
+    Bodies are emitted VERBATIM; only the SEAMS between top-level regions are canonical:
+    two blank lines around any def/class region (PEP-8), one blank line between text
+    regions, and exactly one trailing newline. So decompose→emit is identity on PEP-8
+    source and seam-normalizing otherwise (the deliberate v1 fidelity bar: bodies
+    byte-exact, seams canonical, semantically equal)."""
+    parts: List[str] = []
+    for i, r in enumerate(regions):
+        if i > 0:
+            either_symbol = r.kind == "symbol" or regions[i - 1].kind == "symbol"
+            parts.append("\n\n\n" if either_symbol else "\n\n")
+        parts.append(r.text.rstrip("\n"))
+    return ("".join(parts) + "\n") if parts else ""
