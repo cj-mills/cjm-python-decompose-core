@@ -30,6 +30,8 @@ class ParsedSymbol:
     decorators: List[str] = field(default_factory=list)  # Decorator names (e.g. "dataclass", "property")
     calls: List[str] = field(default_factory=list)       # Names this symbol directly references/calls (dedup, order-preserved)
     children: List["ParsedSymbol"] = field(default_factory=list)  # Nested symbols (a class's methods, a nested function)
+    first_param: str = ""              # The function's first parameter name ("" for a class / no-arg fn); "self"/"cls" marks method-shaped
+    first_param_annotation: str = ""   # The first param's type annotation name (e.g. "JobQueue" for `@patch def f(self:JobQueue)`)
 
 
 @dataclass
@@ -78,6 +80,38 @@ def _decorator_name(
     return ""
 
 
+def _annotation_name(
+    ann: ast.AST,  # A type-annotation expression (or None)
+) -> str:  # The annotation's bare name ("" when absent/unsupported)
+    """Bare annotation name: `JobQueue` -> "JobQueue", `mod.T` -> "T", `"JobQueue"` (forward ref) -> "JobQueue"."""
+    if ann is None:
+        return ""
+    if isinstance(ann, ast.Name):
+        return ann.id
+    if isinstance(ann, ast.Attribute):
+        return ann.attr
+    if isinstance(ann, ast.Constant) and isinstance(ann.value, str):
+        return ann.value
+    return ""
+
+
+def _first_param(
+    node: ast.AST,  # A FunctionDef / AsyncFunctionDef node
+) -> "tuple[str, str]":  # (first param name, its annotation name) — ("","") when none
+    """The function's first positional parameter name + annotation (the method-shape signal).
+
+    A first param named `self`/`cls` marks a method-shaped function; its annotation
+    (e.g. `self: JobQueue` under `@patch`) names the class the method belongs to."""
+    args = getattr(node, "args", None)
+    posonly = list(getattr(args, "posonlyargs", []) or []) if args else []
+    pos = list(getattr(args, "args", []) or []) if args else []
+    ordered = posonly + pos
+    if not ordered:
+        return "", ""
+    a = ordered[0]
+    return a.arg, _annotation_name(a.annotation)
+
+
 def _collect_calls(
     node: ast.AST,         # A statement/expression node to scan
     names: "dict[str, None]",  # Accumulator (ordered set via dict keys)
@@ -120,8 +154,10 @@ def _extract_symbols(
         qual = f"{parent_qual}.{node.name}" if parent_qual else node.name
         if isinstance(node, ast.ClassDef):
             kind = "class"
+            fp, fpa = "", ""
         else:
             kind = "method" if in_class else "function"
+            fp, fpa = _first_param(node)
         out.append(ParsedSymbol(
             qualname=qual,
             name=node.name,
@@ -132,6 +168,8 @@ def _extract_symbols(
             calls=_direct_calls(node),
             children=_extract_symbols(node.body, parent_qual=qual,
                                       in_class=isinstance(node, ast.ClassDef)),
+            first_param=fp,
+            first_param_annotation=fpa,
         ))
     return out
 
@@ -175,6 +213,30 @@ def parse_module(
         imports=_module_imports(tree),
         symbols=_extract_symbols(tree.body),
     )
+
+
+def monkeypatch_assignments(
+    text: str,  # Module / cell source text
+) -> List["tuple[str, str, str]"]:  # (class_name, attr_name, value_func_name) per top-level `Class.attr = func`
+    """Top-level monkey-patch assignments: `Class.method = func` (the incremental-class idiom).
+
+    The nbdev/notebook pattern (e.g. `JobQueue.submit = submit`) that reattaches a
+    free function as a class method in a later cell — opaque to the AST symbol walk, so
+    surfaced here for the compositor to rebuild the true class->method structure. Only
+    `Attribute(Name) = Name` top-level assigns are matched (precision over recall)."""
+    out: List["tuple[str, str, str]"] = []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return out
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Name):
+            continue
+        func = node.value.id
+        for tgt in node.targets:
+            if (isinstance(tgt, ast.Attribute) and isinstance(tgt.value, ast.Name)):
+                out.append((tgt.value.id, tgt.attr, func))
+    return out
 
 
 def iter_symbols(
