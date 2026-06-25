@@ -99,4 +99,5 @@ def corpus_graph_elements(
 
         for s in d.symbols:
             edges.extend(s.calls_edges(call_map))
+            edges.extend(s.uses_edges(call_map))
     return nodes, edges

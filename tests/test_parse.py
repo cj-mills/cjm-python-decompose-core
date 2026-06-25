@@ -94,6 +94,33 @@ def test_method_calls(parsed):
     assert "draw" in render.calls  # `self.label` is an attribute access, not a call
 
 
+REF_SRC = '''
+from mod import Base, MyType, Ret, thing
+
+
+class Sub(Base):
+    field: MyType
+
+
+def f(x: MyType) -> Ret:
+    return thing(x)
+'''
+
+
+def test_refs_are_superset_of_calls_capturing_bases_and_annotations():
+    m = parse_module(REF_SRC)
+    sub = next(s for s in m.symbols if s.qualname == "Sub")
+    f = next(s for s in m.symbols if s.qualname == "f")
+    # base class + class-level annotation are REFERENCES but not CALLS.
+    assert "Base" in sub.refs and "MyType" in sub.refs
+    assert "Base" not in sub.calls
+    # function param/return annotations are refs; only the actual call is a call.
+    assert {"MyType", "Ret"} <= set(f.refs)
+    assert "thing" in f.calls and "thing" in f.refs
+    assert "MyType" not in f.calls
+    assert set(f.calls) <= set(f.refs)              # refs is a strict superset of calls
+
+
 def test_iter_symbols_flattens_parents_before_children(parsed):
     quals = [s.qualname for s in iter_symbols(parsed)]
     assert quals.index("Widget") < quals.index("Widget.label")

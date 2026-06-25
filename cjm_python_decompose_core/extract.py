@@ -91,7 +91,7 @@ def _build_symbols(
         node = CodeSymbolNode(
             module_id=module.id, qualname=ps.qualname, symbol_kind=ps.kind,
             path=path, content_hash=content_hash, lineno=ps.lineno,
-            docstring=ps.docstring, calls=list(ps.calls),
+            docstring=ps.docstring, calls=list(ps.calls), refs=list(ps.refs),
             properties={"decorators": list(ps.decorators)} if ps.decorators else {},
         )
         symbols.append(node)

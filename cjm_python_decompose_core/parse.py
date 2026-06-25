@@ -28,7 +28,8 @@ class ParsedSymbol:
     lineno: int                        # 1-based start line
     docstring: str = ""                # First non-empty line of the symbol's docstring ("" if none)
     decorators: List[str] = field(default_factory=list)  # Decorator names (e.g. "dataclass", "property")
-    calls: List[str] = field(default_factory=list)       # Names this symbol directly references/calls (dedup, order-preserved)
+    calls: List[str] = field(default_factory=list)       # Names this symbol directly CALLS (call-callees only; dedup, order-preserved)
+    refs: List[str] = field(default_factory=list)        # Names this symbol REFERENCES (superset of calls: + bases/annotations/decorators/name loads)
     children: List["ParsedSymbol"] = field(default_factory=list)  # Nested symbols (a class's methods, a nested function)
     first_param: str = ""              # The function's first parameter name ("" for a class / no-arg fn); "self"/"cls" marks method-shaped
     first_param_annotation: str = ""   # The first param's type annotation name (e.g. "JobQueue" for `@patch def f(self:JobQueue)`)
@@ -141,6 +142,56 @@ def _direct_calls(
     return list(names)
 
 
+def _collect_refs(
+    node: ast.AST,             # A statement/expression node to scan
+    names: "dict[str, None]",  # Accumulator (ordered set via dict keys)
+) -> None:
+    """Collect ALL referenced bare names under `node`, NOT descending into nested defs.
+
+    The superset of `_collect_calls`: every `Name` load and `Attribute` access (so a
+    base class, a type annotation used bare, a decorator, a referenced constant — not
+    just call-callees). A nested def owns its own refs, so its subtree is skipped."""
+    if isinstance(node, _DEF_TYPES):
+        return
+    if isinstance(node, ast.Name):
+        names.setdefault(node.id, None)
+    elif isinstance(node, ast.Attribute):
+        names.setdefault(node.attr, None)
+    for child in ast.iter_child_nodes(node):
+        _collect_refs(child, names)
+
+
+def _direct_refs(
+    node: ast.AST,  # A FunctionDef / AsyncFunctionDef / ClassDef node
+) -> List[str]:  # Referenced names in the symbol's own code (dedup, order-preserved)
+    """All names a symbol references in its OWN code (excluding nested def bodies).
+
+    Spans the signature surface a body-only call walk misses — decorators, class bases
+    + keywords, parameter/return annotations — plus the body's Name/Attribute loads.
+    Resolution against the corpus filters locals/builtins, so over-collection is safe."""
+    names: "dict[str, None]" = {}
+    for dec in getattr(node, "decorator_list", []):
+        _collect_refs(dec, names)
+    if isinstance(node, ast.ClassDef):
+        for base in node.bases:
+            _collect_refs(base, names)
+        for kw in node.keywords:                       # metaclass= and other class kwargs
+            _collect_refs(kw.value, names)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        args = node.args
+        all_args = (list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs)
+                    + ([args.vararg] if args.vararg else [])
+                    + ([args.kwarg] if args.kwarg else []))
+        for a in all_args:
+            if a is not None and a.annotation is not None:
+                _collect_refs(a.annotation, names)
+        if node.returns is not None:
+            _collect_refs(node.returns, names)
+    for stmt in getattr(node, "body", []):
+        _collect_refs(stmt, names)
+    return list(names)
+
+
 def _extract_symbols(
     body: List[ast.stmt],   # A module/class/function body
     parent_qual: str = "",  # Enclosing qualname prefix ("" at module level)
@@ -166,6 +217,7 @@ def _extract_symbols(
             docstring=_docstring_first_line(node),
             decorators=[d for d in (_decorator_name(x) for x in node.decorator_list) if d],
             calls=_direct_calls(node),
+            refs=_direct_refs(node),
             children=_extract_symbols(node.body, parent_qual=qual,
                                       in_class=isinstance(node, ast.ClassDef)),
             first_param=fp,
