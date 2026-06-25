@@ -30,6 +30,7 @@ class ParsedSymbol:
     decorators: List[str] = field(default_factory=list)  # Decorator names (e.g. "dataclass", "property")
     calls: List[str] = field(default_factory=list)       # Names this symbol directly CALLS (call-callees only; dedup, order-preserved)
     refs: List[str] = field(default_factory=list)        # Names this symbol REFERENCES (superset of calls: + bases/annotations/decorators/name loads)
+    import_bindings: List[dict] = field(default_factory=list)  # Top-level imports this symbol's refs use (travel with it on a move; imports-as-projection)
     children: List["ParsedSymbol"] = field(default_factory=list)  # Nested symbols (a class's methods, a nested function)
     first_param: str = ""              # The function's first parameter name ("" for a class / no-arg fn); "self"/"cls" marks method-shaped
     first_param_annotation: str = ""   # The first param's type annotation name (e.g. "JobQueue" for `@patch def f(self:JobQueue)`)
@@ -41,6 +42,8 @@ class ParsedModule:
     docstring: str = ""                # First non-empty line of the module docstring
     imports: List[str] = field(default_factory=list)  # Imported module names (dotted; relative kept as ".pkg"), dedup/order-preserved
     symbols: List[ParsedSymbol] = field(default_factory=list)  # Top-level symbols (each may carry children)
+    import_bindings: dict = field(default_factory=dict)        # {local-name: binding} for every TOP-LEVEL import (the imports-as-projection table)
+    module_used_bindings: List[dict] = field(default_factory=list)  # Bindings used by module-level (non-def) code — constants/__all__/__main__
 
 
 def _docstring_first_line(
@@ -192,8 +195,53 @@ def _direct_refs(
     return list(names)
 
 
+def _import_bindings(
+    tree: ast.Module,  # The parsed module
+) -> "dict[str, dict]":  # {local-name bound in the namespace: its binding descriptor}
+    """Map each name a TOP-LEVEL import binds to a descriptor emit can regenerate.
+
+    Only module-level imports (a local import inside a function stays in that function's
+    verbatim body, so it must NOT be hoisted to the regenerated module import block).
+    `import a.b` binds `a`; `import a.b as c` binds `c`; `from m import x [as y]` binds
+    `y or x`. The descriptor carries kind/module/imported/alias/level so a faithful
+    `import ...` / `from ... import ...` line can be re-emitted and a symbol's used subset
+    can travel with it on a move."""
+    out: "dict[str, dict]" = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local = alias.asname or alias.name.split(".")[0]
+                out[local] = {"name": local, "kind": "import", "module": alias.name,
+                              "imported": "", "alias": alias.asname or "", "level": 0}
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                local = alias.asname or alias.name
+                out[local] = {"name": local, "kind": "from", "module": node.module or "",
+                              "imported": alias.name, "alias": alias.asname or "",
+                              "level": node.level or 0}
+    return out
+
+
+def _used_bindings(
+    ref_names: List[str],       # Names a symbol (or region) references
+    bindings: "dict[str, dict]",  # The module's top-level import-binding table
+) -> List[dict]:  # The binding descriptors those refs use (order-preserved, dedup)
+    """The subset of `bindings` a set of referenced names actually uses."""
+    out: List[dict] = []
+    seen: set = set()
+    for r in ref_names:
+        b = bindings.get(r)
+        if b is not None and r not in seen:
+            seen.add(r)
+            out.append(b)
+    return out
+
+
 def _extract_symbols(
     body: List[ast.stmt],   # A module/class/function body
+    bindings: "dict[str, dict]",  # The module's top-level import-binding table (for per-symbol used imports)
     parent_qual: str = "",  # Enclosing qualname prefix ("" at module level)
     in_class: bool = False,  # Whether `body` is a class body (so defs are methods)
 ) -> List[ParsedSymbol]:  # Symbols declared directly in this body (with children)
@@ -209,6 +257,7 @@ def _extract_symbols(
         else:
             kind = "method" if in_class else "function"
             fp, fpa = _first_param(node)
+        refs = _direct_refs(node)
         out.append(ParsedSymbol(
             qualname=qual,
             name=node.name,
@@ -217,8 +266,9 @@ def _extract_symbols(
             docstring=_docstring_first_line(node),
             decorators=[d for d in (_decorator_name(x) for x in node.decorator_list) if d],
             calls=_direct_calls(node),
-            refs=_direct_refs(node),
-            children=_extract_symbols(node.body, parent_qual=qual,
+            refs=refs,
+            import_bindings=_used_bindings(refs, bindings),
+            children=_extract_symbols(node.body, bindings, parent_qual=qual,
                                       in_class=isinstance(node, ast.ClassDef)),
             first_param=fp,
             first_param_annotation=fpa,
@@ -260,10 +310,18 @@ def parse_module(
     Raises `SyntaxError` on unparseable source (the caller decides how to handle a
     malformed file — there is no silent partial parse)."""
     tree = ast.parse(text)
+    bindings = _import_bindings(tree)
+    # Imports used by module-level (non-def) code — constants, __all__, an `if __main__`.
+    mod_names: "dict[str, None]" = {}
+    for stmt in tree.body:
+        if not isinstance(stmt, _DEF_TYPES):
+            _collect_refs(stmt, mod_names)
     return ParsedModule(
         docstring=_docstring_first_line(tree),
         imports=_module_imports(tree),
-        symbols=_extract_symbols(tree.body),
+        symbols=_extract_symbols(tree.body, bindings),
+        import_bindings=bindings,
+        module_used_bindings=_used_bindings(list(mod_names), bindings),
     )
 
 

@@ -121,6 +121,40 @@ def test_refs_are_superset_of_calls_capturing_bases_and_annotations():
     assert set(f.calls) <= set(f.refs)              # refs is a strict superset of calls
 
 
+BIND_SRC = '''
+import os
+from pathlib import Path
+from .util import helper as h
+
+CONST = os.getcwd()
+
+
+def f(p: Path):
+    return h(p)
+'''
+
+
+def test_import_bindings_per_symbol_and_module_level():
+    m = parse_module(BIND_SRC)
+    # the module's binding table maps each bound LOCAL name.
+    assert set(m.import_bindings) == {"os", "Path", "h"}
+    assert m.import_bindings["h"] == {"name": "h", "kind": "from", "module": "util",
+                                      "imported": "helper", "alias": "h", "level": 1}  # dots from `level`
+    # f uses Path (annotation) + h (call) -> those two bindings travel with it; not os.
+    f = next(s for s in m.symbols if s.qualname == "f")
+    used = {b["name"] for b in f.import_bindings}
+    assert used == {"Path", "h"}
+    # module-level code (`CONST = os.getcwd()`) carries the os binding.
+    assert {b["name"] for b in m.module_used_bindings} == {"os"}
+
+
+def test_local_import_not_hoisted_to_bindings():
+    src = "def f():\n    import json\n    return json.dumps({})\n"
+    m = parse_module(src)
+    assert m.import_bindings == {}                  # a function-local import is NOT a module binding
+    assert m.symbols[0].import_bindings == []
+
+
 def test_iter_symbols_flattens_parents_before_children(parsed):
     quals = [s.qualname for s in iter_symbols(parsed)]
     assert quals.index("Widget") < quals.index("Widget.label")

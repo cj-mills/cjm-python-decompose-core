@@ -92,6 +92,7 @@ def _build_symbols(
             module_id=module.id, qualname=ps.qualname, symbol_kind=ps.kind,
             path=path, content_hash=content_hash, lineno=ps.lineno,
             docstring=ps.docstring, calls=list(ps.calls), refs=list(ps.refs),
+            import_bindings=list(ps.import_bindings),
             properties={"decorators": list(ps.decorators)} if ps.decorators else {},
         )
         symbols.append(node)
@@ -120,6 +121,7 @@ def decompose_text(
         repo_key=repo_key, module_path=module_path, path=path, content_hash=ch,
         import_name=import_name if import_name is not None else import_name_for(module_path),
         docstring=parsed.docstring, imports=list(parsed.imports),
+        import_bindings=list(parsed.module_used_bindings),
     )
     symbols, defines = _build_symbols(module, parsed, ch, path)
 
