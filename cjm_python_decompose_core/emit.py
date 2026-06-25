@@ -95,15 +95,28 @@ def render_import_block(
     return "\n".join(lines)
 
 
+def synth_import(local_name: str, import_name: str) -> Dict[str, Any]:
+    """A synthetic `from <import_name> import <local_name>` binding (USES-derived).
+
+    For an INTRA-corpus reference that has no import statement of its own — a symbol that
+    referenced a same-module sibling and then MOVED, so the sibling is now cross-module.
+    Absolute form (the target module's dotted import name); the round-trip bar is semantic."""
+    return {"name": local_name, "kind": "from", "module": import_name,
+            "imported": local_name, "alias": "", "level": 0}
+
+
 def module_used_bindings(
-    symbol_nodes: Any,        # The module's CodeSymbol nodes (objects or wire dicts) — carry per-symbol import_bindings
-    module_node: Any = None,  # The CodeModule node (carries module-level import_bindings) — optional
+    symbol_nodes: Any,         # The module's CodeSymbol nodes (objects or wire dicts) — carry per-symbol import_bindings
+    module_node: Any = None,   # The CodeModule node (carries module-level import_bindings) — optional
+    uses_derived: Any = None,  # USES-derived synthetic bindings (intra-corpus imports the frozen bindings can't carry)
 ) -> List[Dict[str, Any]]:  # The unioned import bindings this module needs
-    """Union of every contained symbol's import bindings + the module-level ones.
+    """Union of every contained symbol's import bindings + the module-level ones (+ any
+    USES-derived synthetics for names no binding covers).
 
     This is the input to `render_import_block`: which imports the module's CURRENT members
-    (symbols + module-level code) actually use — so moving a symbol between modules
-    recomputes both sides' import blocks correctly (imports-as-projection / pure move)."""
+    actually use. The frozen per-symbol bindings carry external + already-cross-module deps;
+    `uses_derived` adds the imports that only become cross-module AFTER a move (a former
+    same-module reference) — together they make the relocate ZERO-RESIDUAL."""
     def get(node: Any, key: str) -> List[Dict[str, Any]]:
         if node is None:
             return []
@@ -119,6 +132,12 @@ def module_used_bindings(
         out.extend(get(module_node, "import_bindings"))
     for s in symbol_nodes:
         out.extend(get(s, "import_bindings"))
+    if uses_derived:                                     # add only names no explicit binding covers
+        covered = {b.get("name") for b in out}
+        for b in uses_derived:
+            if b.get("name") not in covered:
+                out.append(b)
+                covered.add(b.get("name"))
     return out
 
 
@@ -213,6 +232,7 @@ def emit_module_from_nodes(
     nodes: Any,  # The module's CodeSymbol (incl. methods, for bindings) + CodeText nodes
     module_node: Any = None,        # The CodeModule node (module-level import bindings) — for derive_imports
     derive_imports: bool = False,   # Regenerate the import block from bindings instead of the verbatim region
+    uses_derived: Any = None,       # USES-derived synthetic imports (zero-residual move) — for derive_imports
 ) -> str:  # The reconstructed canonical `.py` source
     """Reassemble a module's canonical `.py` source from its graph nodes (the round-trip).
 
@@ -224,7 +244,7 @@ def emit_module_from_nodes(
     if not derive_imports:
         return emit_regions(regions)
     symbols = [n for n in nodes if _label_of(n) == "CodeSymbol"]
-    block = render_import_block(module_used_bindings(symbols, module_node))
+    block = render_import_block(module_used_bindings(symbols, module_node, uses_derived))
     rebuilt: List[SourceRegion] = []
     for r in regions:
         if r.kind == "text":
