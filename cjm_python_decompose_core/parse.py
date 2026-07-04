@@ -188,6 +188,9 @@ def _direct_refs(
         for a in all_args:
             if a is not None and a.annotation is not None:
                 _collect_refs(a.annotation, names)
+        for d in list(args.defaults) + list(args.kw_defaults):  # parameter DEFAULTS reference names too
+            if d is not None:
+                _collect_refs(d, names)
         if node.returns is not None:
             _collect_refs(node.returns, names)
     for stmt in getattr(node, "body", []):

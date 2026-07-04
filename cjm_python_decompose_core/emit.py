@@ -13,6 +13,7 @@ bar: symbol/region BODIES are byte-exact, only the inter-region seams are canoni
 necessarily byte-identical to a non-PEP-8 original.
 """
 
+import ast
 import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
@@ -250,7 +251,25 @@ _IMPORT_LINE = re.compile(r"\s*(from|import)\s")
 def _strip_import_lines(text: str) -> str:  # The region text with top-level import statements removed
     """Drop top-level `import`/`from ... import` statements (paren/backslash continuations
     included) from a text region, keeping any non-import lines — so a region that mixes
-    imports with a constant keeps the constant while the imports are regenerated."""
+    imports with a constant keeps the constant while the imports are regenerated.
+
+    AST-located: only lines spanned by a real top-level Import/ImportFrom statement drop —
+    a DOCSTRING line that merely starts with `from ...` survives (the line-regex fallback,
+    for a region that doesn't parse standalone, would eat it), and an import nested in an
+    `if`/`try` is conditional logic, not a derivable binding, so it stays too."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return _strip_import_lines_regex(text)
+    drop: set = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            drop.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
+    return "\n".join(ln for i, ln in enumerate(text.splitlines(), 1) if i not in drop)
+
+
+def _strip_import_lines_regex(text: str) -> str:  # The pre-AST fallback (unparseable region)
+    """Line-regex import stripping — only for a region `ast.parse` rejects."""
     lines = text.splitlines()
     out: List[str] = []
     i = 0

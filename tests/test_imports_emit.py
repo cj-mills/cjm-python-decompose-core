@@ -84,3 +84,36 @@ def test_emit_module_default_is_verbatim_not_derived():
     d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", src)
     nodes = [s.to_graph_node() for s in d.symbols] + [t.to_graph_node() for t in d.texts]
     assert emit_module_from_nodes(nodes) == src           # unused Dict kept (verbatim, no pruning)
+
+
+def test_parameter_default_reference_is_not_pruned():
+    # A name used ONLY as a parameter DEFAULT is a real reference — pruning its
+    # import would raise NameError at def-evaluation time (the serve.py near-miss).
+    src = ("from .config import DEFAULT_DIR\n"
+           "\n\n"
+           "def serve(path: str = DEFAULT_DIR):\n"
+           "    return path\n")
+    d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", src)
+    nodes = [s.to_graph_node() for s in d.symbols] + [t.to_graph_node() for t in d.texts]
+    emitted = emit_module_from_nodes(nodes, module_node=d.module.to_graph_node(), derive_imports=True)
+    assert "from .config import DEFAULT_DIR" in emitted
+
+
+def test_docstring_lines_starting_with_from_survive_derive():
+    # A module-docstring LINE beginning with `from ` is prose, not an import — the
+    # AST-located strip must keep it (the devgraph.py/runtime.py near-miss).
+    src = ('"""Build things\n'
+           "from each pyproject) into the lists that extend_graph commits.\n"
+           'import-shaped prose line too.\n'
+           '"""\n'
+           "import os\n"
+           "\n\n"
+           "def f():\n"
+           "    return os.getpid()\n")
+    d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", src)
+    nodes = [s.to_graph_node() for s in d.symbols] + [t.to_graph_node() for t in d.texts]
+    emitted = emit_module_from_nodes(nodes, module_node=d.module.to_graph_node(), derive_imports=True)
+    assert "from each pyproject) into the lists" in emitted
+    assert "import-shaped prose line too." in emitted
+    assert "import os" in emitted
+    compile(emitted, "m.py", "exec")
