@@ -12,11 +12,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from cjm_context_graph_primitives.provenance import SourceRef
-from cjm_dev_graph_schema.nodes import (CodeModuleNode, CodeSymbolNode,
-                                        CodeTextNode)
+from cjm_dev_graph_schema.nodes import CodeModuleNode, CodeSymbolNode, CodeTextNode
 
-from .parse import (ParsedModule, SourceRegion, emit_regions, parse_module,
-                    parse_regions)
+from .parse import parse_module, parse_regions, ParsedModule, SourceRegion
 
 # Directories never decomposed as source (generated / virtualenv / packaging cruft).
 _SKIP_DIRS = {"__pycache__", ".git", ".ipynb_checkpoints", "build", "dist", ".eggs"}

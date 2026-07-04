@@ -17,7 +17,7 @@ import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from .parse import SourceRegion, emit_regions
+from .parse import emit_regions, SourceRegion
 
 _SYMBOL_LABELS = {"CodeSymbol"}
 _TEXT_LABELS = {"CodeText"}
