@@ -14,6 +14,7 @@ necessarily byte-identical to a non-PEP-8 original.
 """
 
 import re
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from .parse import SourceRegion, emit_regions
@@ -54,6 +55,38 @@ def _from_name(b: Dict[str, Any]) -> str:
     return f"{name} as {b['alias']}" if b.get("alias") and b["alias"] != name else name
 
 
+_IMPORT_WRAP_WIDTH = 100  # A from-import line longer than this wraps in aligned parentheses
+
+
+def _import_section(level: int, module: str) -> int:
+    """The isort-style section a binding sorts into: 0 stdlib · 1 third-party · 2 relative."""
+    if level:
+        return 2
+    top = (module or "").split(".")[0]
+    return 0 if top in sys.stdlib_module_names else 1
+
+
+def _render_from_line(level: int, module: str, names: List[str]) -> str:
+    """One merged `from ... import a, b, c` line, parenthesized+aligned when over-width."""
+    head = f"from {'.' * level}{module} import "
+    line = head + ", ".join(names)
+    if len(line) <= _IMPORT_WRAP_WIDTH:
+        return line
+    indent = " " * (len(head) + 1)
+    lines, cur = [], head + "("
+    for i, name in enumerate(names):
+        piece = name + ("," if i < len(names) - 1 else ")")
+        if cur.endswith("("):
+            cur += piece
+        elif len(cur) + 1 + len(piece) <= _IMPORT_WRAP_WIDTH:
+            cur += " " + piece
+        else:
+            lines.append(cur)
+            cur = indent + piece
+    lines.append(cur)
+    return "\n".join(lines)
+
+
 def render_import_block(
     bindings: List[Dict[str, Any]],  # Import-binding descriptors (per-symbol + module-level, unioned)
 ) -> str:  # The canonical import block text ("" when none)
@@ -61,10 +94,12 @@ def render_import_block(
 
     The imports-as-projection emit: the block is GENERATED from the bindings the module's
     symbols actually use (so an unused import is auto-pruned), deterministically ordered —
-    `from __future__` first, then `import` statements, then `from` imports (absolute before
-    relative), all sorted by module; same-source `from` imports MERGE onto one line. Faithful
-    at the SET level (the round-trip bar is semantic equality of the import set, not
-    byte-identity to a hand-ordered original)."""
+    `from __future__` first, then isort-style SECTIONS separated by a blank line (stdlib,
+    third-party, relative — classified via `sys.stdlib_module_names`), each section's
+    `import` statements before its `from` imports, all sorted by module; same-source `from`
+    imports MERGE onto one line, parenthesized+aligned when over-width. Faithful at the SET
+    level (the round-trip bar is semantic equality of the import set, not byte-identity to
+    a hand-ordered original)."""
     seen: set = set()
     uniq: List[Dict[str, Any]] = []
     for b in bindings:
@@ -74,25 +109,32 @@ def render_import_block(
             uniq.append(b)
 
     future: List[str] = []
-    plain_imports: List[Dict[str, Any]] = []
-    from_groups: Dict[Tuple[int, str], List[str]] = {}
+    plain_by_section: Dict[int, List[Dict[str, Any]]] = {}
+    from_groups: Dict[Tuple[int, int, str], List[str]] = {}
     for b in uniq:
+        level, module = b.get("level", 0), b.get("module") or ""
         if b.get("kind") == "import":
-            plain_imports.append(b)
-        elif b.get("module") == "__future__" and not b.get("level", 0):
+            plain_by_section.setdefault(_import_section(level, module), []).append(b)
+        elif module == "__future__" and not level:
             future.append(_from_name(b))
         else:
-            from_groups.setdefault((b.get("level", 0), b.get("module") or ""), []).append(_from_name(b))
+            from_groups.setdefault((_import_section(level, module), level, module),
+                                   []).append(_from_name(b))
 
-    lines: List[str] = []
+    sections: List[List[str]] = []
     if future:
-        lines.append(f"from __future__ import {', '.join(sorted(set(future)))}")
-    for b in sorted(plain_imports, key=lambda x: (x.get("module") or "").lower()):
-        lines.append(render_binding(b))
-    for (level, module) in sorted(from_groups, key=lambda k: (k[0], k[1].lower())):
-        names = ", ".join(sorted(set(from_groups[(level, module)]), key=str.lower))
-        lines.append(f"from {'.' * level}{module} import {names}")
-    return "\n".join(lines)
+        sections.append([f"from __future__ import {', '.join(sorted(set(future)))}"])
+    for sec in (0, 1, 2):
+        lines: List[str] = []
+        for b in sorted(plain_by_section.get(sec, []), key=lambda x: (x.get("module") or "").lower()):
+            lines.append(render_binding(b))
+        for (s, level, module) in sorted((k for k in from_groups if k[0] == sec),
+                                         key=lambda k: (k[1], k[2].lower())):
+            names = sorted(set(from_groups[(s, level, module)]), key=str.lower)
+            lines.append(_render_from_line(level, module, names))
+        if lines:
+            sections.append(lines)
+    return "\n\n".join("\n".join(lines) for lines in sections)
 
 
 def synth_import(local_name: str, import_name: str) -> Dict[str, Any]:

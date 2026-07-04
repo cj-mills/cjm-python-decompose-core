@@ -22,12 +22,29 @@ def test_render_binding_forms():
 def test_render_import_block_orders_dedups_and_groups():
     bindings = [_b("Path", "from", "pathlib", "Path"),
                 _b("h", "from", "util", "helper", "h", 1),
+                _b("np", "import", "numpy", alias="np"),
                 _b("os", "import", "os"),
                 _b("os", "import", "os")]                 # duplicate -> collapsed
     assert render_import_block(bindings) == (
-        "import os\n"                                     # `import` first
-        "from pathlib import Path\n"                      # then absolute `from`
-        "from .util import helper as h")                  # then relative
+        "import os\n"                                     # stdlib section: `import` first
+        "from pathlib import Path\n"                      # then its `from` imports
+        "\n"
+        "import numpy as np\n"                            # third-party section
+        "\n"
+        "from .util import helper as h")                  # relative section
+
+
+def test_render_import_block_wraps_long_from_lines_in_aligned_parens():
+    names = [f"very_long_symbol_name_{i:02d}" for i in range(8)]
+    bindings = [_b(n, "from", "identity", n, level=1) for n in names]
+    block = render_import_block(bindings)
+    lines = block.splitlines()
+    assert lines[0].startswith("from .identity import (") and lines[-1].endswith(")")
+    assert all(len(ln) <= 100 for ln in lines)
+    indent = " " * len("from .identity import (")
+    assert all(ln.startswith(indent) for ln in lines[1:])
+    # The wrapped block round-trips: parsing it back yields the same import set.
+    compile(block, "m.py", "exec")
 
 
 def test_derived_block_is_faithful_and_prunes_dead_imports():
