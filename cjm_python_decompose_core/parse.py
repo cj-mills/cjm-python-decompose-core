@@ -42,7 +42,7 @@ class ParsedModule:
     docstring: str = ""                # First non-empty line of the module docstring
     imports: List[str] = field(default_factory=list)  # Imported module names (dotted; relative kept as ".pkg"), dedup/order-preserved
     symbols: List[ParsedSymbol] = field(default_factory=list)  # Top-level symbols (each may carry children)
-    import_bindings: dict = field(default_factory=dict)        # {local-name: binding} for every TOP-LEVEL import (the imports-as-projection table)
+    import_bindings: dict = field(default_factory=dict)        # {local-name: [binding, ...]} for every TOP-LEVEL import (the imports-as-projection table; a list because plain submodule imports sharing a root coexist)
     module_used_bindings: List[dict] = field(default_factory=list)  # Bindings used by module-level (non-def) code — constants/__all__/__main__
 
 
@@ -200,45 +200,65 @@ def _direct_refs(
 
 def _import_bindings(
     tree: ast.Module,  # The parsed module
-) -> "dict[str, dict]":  # {local-name bound in the namespace: its binding descriptor}
-    """Map each name a TOP-LEVEL import binds to a descriptor emit can regenerate.
+) -> "dict[str, list[dict]]":  # {local-name bound in the namespace: its binding descriptor(s)}
+    """Map each name a TOP-LEVEL import binds to descriptor(s) emit can regenerate.
 
     Only module-level imports (a local import inside a function stays in that function's
     verbatim body, so it must NOT be hoisted to the regenerated module import block).
     `import a.b` binds `a`; `import a.b as c` binds `c`; `from m import x [as y]` binds
     `y or x`. The descriptor carries kind/module/imported/alias/level so a faithful
     `import ...` / `from ... import ...` line can be re-emitted and a symbol's used subset
-    can travel with it on a move."""
-    out: "dict[str, dict]" = {}
+    can travel with it on a move.
+
+    A name maps to a LIST because plain un-aliased submodule imports COEXIST: `import
+    urllib.request` + `import urllib.error` both bind `urllib` and both statements are
+    live (each initializes a different submodule) — keying one descriptor per name
+    silently dropped all but the last (the flip-time import-dedupe bug). Aliased and
+    `from` imports rebinding a name genuinely supersede it (Python's last-binding-wins),
+    so those still REPLACE the entry."""
+    out: "dict[str, list[dict]]" = {}
     for node in tree.body:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 local = alias.asname or alias.name.split(".")[0]
-                out[local] = {"name": local, "kind": "import", "module": alias.name,
-                              "imported": "", "alias": alias.asname or "", "level": 0}
+                desc = {"name": local, "kind": "import", "module": alias.name,
+                        "imported": "", "alias": alias.asname or "", "level": 0}
+                existing = out.get(local)
+                if (not alias.asname and existing
+                        and all(d["kind"] == "import" and not d["alias"] for d in existing)):
+                    if not any(d["module"] == alias.name for d in existing):
+                        existing.append(desc)
+                else:
+                    out[local] = [desc]
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name == "*":
                     continue
                 local = alias.asname or alias.name
-                out[local] = {"name": local, "kind": "from", "module": node.module or "",
-                              "imported": alias.name, "alias": alias.asname or "",
-                              "level": node.level or 0}
+                out[local] = [{"name": local, "kind": "from", "module": node.module or "",
+                               "imported": alias.name, "alias": alias.asname or "",
+                               "level": node.level or 0}]
     return out
 
 
 def _used_bindings(
     ref_names: List[str],       # Names a symbol (or region) references
-    bindings: "dict[str, dict]",  # The module's top-level import-binding table
+    bindings: "dict[str, list[dict]]",  # The module's top-level import-binding table
 ) -> List[dict]:  # The binding descriptors those refs use (order-preserved, dedup)
-    """The subset of `bindings` a set of referenced names actually uses."""
+    """The subset of `bindings` a set of referenced names actually uses.
+
+    A referenced name pulls in EVERY descriptor bound to it (all coexisting
+    `import root.sub` statements — the ref walk sees only `root`, so which submodule
+    the symbol touches is unknowable; carrying all of them is the faithful answer)."""
     out: List[dict] = []
     seen: set = set()
     for r in ref_names:
-        b = bindings.get(r)
-        if b is not None and r not in seen:
-            seen.add(r)
-            out.append(b)
+        for b in bindings.get(r, ()):
+            k = (b.get("kind"), b.get("level", 0), b.get("module", ""),
+                 b.get("imported", ""), b.get("alias", ""))
+            if k not in seen:
+                seen.add(k)
+                out.append(b)
     return out
 
 

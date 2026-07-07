@@ -138,8 +138,8 @@ def test_import_bindings_per_symbol_and_module_level():
     m = parse_module(BIND_SRC)
     # the module's binding table maps each bound LOCAL name.
     assert set(m.import_bindings) == {"os", "Path", "h"}
-    assert m.import_bindings["h"] == {"name": "h", "kind": "from", "module": "util",
-                                      "imported": "helper", "alias": "h", "level": 1}  # dots from `level`
+    assert m.import_bindings["h"] == [{"name": "h", "kind": "from", "module": "util",
+                                       "imported": "helper", "alias": "h", "level": 1}]  # dots from `level`
     # f uses Path (annotation) + h (call) -> those two bindings travel with it; not os.
     f = next(s for s in m.symbols if s.qualname == "f")
     used = {b["name"] for b in f.import_bindings}

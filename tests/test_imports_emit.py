@@ -117,3 +117,67 @@ def test_docstring_lines_starting_with_from_survive_derive():
     assert "import-shaped prose line too." in emitted
     assert "import os" in emitted
     compile(emitted, "m.py", "exec")
+
+
+def test_coexisting_submodule_imports_both_survive_round_trip():
+    """import urllib.request + import urllib.error both bind `urllib` and both are
+    live — the emit must carry BOTH (regression: the one-descriptor-per-name table
+    kept only the last, silently dropping a used import at flip time)."""
+    text = (
+        "import urllib.error\n"
+        "import urllib.request\n"
+        "\n"
+        "\n"
+        "def fetch(url):\n"
+        "    try:\n"
+        "        return urllib.request.urlopen(url)\n"
+        "    except urllib.error.URLError:\n"
+        "        return None\n"
+    )
+    d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", text)
+    nodes = [s.to_graph_node() for s in d.symbols] + [x.to_graph_node() for x in d.texts]
+    emitted = emit_module_from_nodes(nodes, module_node=d.module.to_graph_node(),
+                                     derive_imports=True)
+    assert "import urllib.error" in emitted
+    assert "import urllib.request" in emitted
+    compile(emitted, "m.py", "exec")
+
+
+def test_rebinding_imports_still_supersede():
+    """Aliased / from-imports rebinding a name follow Python last-binding-wins —
+    only the LIVE binding is emitted."""
+    text = (
+        "from json import dumps\n"
+        "from simplejson import dumps\n"
+        "import numpy as np\n"
+        "import numpy.typing as np\n"
+        "\n"
+        "\n"
+        "def f(x):\n"
+        "    return dumps(x), np\n"
+    )
+    d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", text)
+    nodes = [s.to_graph_node() for s in d.symbols] + [x.to_graph_node() for x in d.texts]
+    emitted = emit_module_from_nodes(nodes, module_node=d.module.to_graph_node(),
+                                     derive_imports=True)
+    assert "from simplejson import dumps" in emitted
+    assert "from json import dumps" not in emitted
+    assert "import numpy.typing as np" in emitted
+    assert emitted.count("import numpy") == 1
+
+
+def test_same_module_imported_twice_dedupes():
+    """A literally duplicated plain import collapses to one statement."""
+    text = (
+        "import os\n"
+        "import os\n"
+        "\n"
+        "\n"
+        "def f():\n"
+        "    return os.getcwd()\n"
+    )
+    d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", text)
+    nodes = [s.to_graph_node() for s in d.symbols] + [x.to_graph_node() for x in d.texts]
+    emitted = emit_module_from_nodes(nodes, module_node=d.module.to_graph_node(),
+                                     derive_imports=True)
+    assert emitted.count("import os") == 1
