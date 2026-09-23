@@ -119,6 +119,37 @@ def test_docstring_lines_starting_with_from_survive_derive():
     compile(emitted, "m.py", "exec")
 
 
+def test_derived_import_block_lands_below_a_shebang_and_docstring():
+    # A shebang (or any comment header) ABOVE the module docstring is still the preamble:
+    # the derived import block must land after it, never at line 1 (regression: the
+    # cascade_manifests.py capture put the imports above `#!/usr/bin/env python3` and the
+    # docstring — the shebang died and the docstring became a bare expression).
+    src = ("#!/usr/bin/env python3\n"
+           '"""A script with a shebang.\n'
+           '"""\n'
+           "\n"
+           "import os\n"
+           "\n\n"
+           "def f():\n"
+           "    return os.getpid()\n")
+    d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", src)
+    nodes = [s.to_graph_node() for s in d.symbols] + [t.to_graph_node() for t in d.texts]
+    emitted = emit_module_from_nodes(nodes, module_node=d.module.to_graph_node(), derive_imports=True)
+    lines = emitted.splitlines()
+    assert lines[0] == "#!/usr/bin/env python3"
+    assert lines[1] == '"""A script with a shebang.'
+    assert lines.index("import os") > lines.index('"""', 2)
+    compile(emitted, "m.py", "exec")
+    # A comments-only header (no docstring) is a preamble too.
+    src2 = "# -*- coding: utf-8 -*-\n# license header\n\nimport os\n\n\ndef g():\n    return os.sep\n"
+    d2 = decompose_text("pkg", "pkg/n.py", "/tmp/n.py", src2)
+    nodes2 = [s.to_graph_node() for s in d2.symbols] + [t.to_graph_node() for t in d2.texts]
+    emitted2 = emit_module_from_nodes(nodes2, module_node=d2.module.to_graph_node(), derive_imports=True)
+    assert emitted2.splitlines()[0] == "# -*- coding: utf-8 -*-"
+    assert "import os" in emitted2
+    compile(emitted2, "n.py", "exec")
+
+
 def test_coexisting_submodule_imports_both_survive_round_trip():
     """import urllib.request + import urllib.error both bind `urllib` and both are
     live — the emit must carry BOTH (regression: the one-descriptor-per-name table

@@ -77,21 +77,31 @@ def _build_symbols(
     parsed: ParsedModule,     # Its parse
     content_hash: str,        # The module file's content hash (symbols share their file's source)
     path: str,                # The file path (provenance locator)
+    symbol_identity: Any = None,  # Optional identity hook: qualname -> birth fields ({birth_repo_key, birth_module_path, birth_qualname, generation}) or None = born at this address
 ) -> Tuple[List[CodeSymbolNode], List[Dict[str, Any]]]:  # (flat symbol nodes, DEFINES edges)
     """Flatten the parse tree into symbol nodes + structural DEFINES edges.
 
     DEFINES runs module->top-level symbol and parent-symbol->nested-symbol, so the
-    nesting (class -> its methods) is preserved as edges, not just qualname text."""
+    nesting (class -> its methods) is preserved as edges, not just qualname text.
+
+    `symbol_identity` is the container-independent identity hook (36f649d3): asked per
+    qualname, it names the BIRTH address of a symbol that was renamed or re-homed since
+    it was born (a keep-identity op in the source journal), so the node keeps the id it
+    was born with and every journaled edge onto it survives the move; None means the
+    symbol is born at this address (the plain derivation). It runs BEFORE the DEFINES
+    edges are built, because those edges name the ids."""
     symbols: List[CodeSymbolNode] = []
     edges: List[Dict[str, Any]] = []
 
     def make(ps) -> CodeSymbolNode:
+        birth = (symbol_identity(ps.qualname) or {}) if symbol_identity else {}
         node = CodeSymbolNode(
             module_id=module.id, qualname=ps.qualname, symbol_kind=ps.kind,
             path=path, content_hash=content_hash, lineno=ps.lineno,
             docstring=ps.docstring, calls=list(ps.calls), refs=list(ps.refs),
             import_bindings=list(ps.import_bindings),
             properties={"decorators": list(ps.decorators)} if ps.decorators else {},
+            **birth,
         )
         symbols.append(node)
         children = [make(c) for c in ps.children]
@@ -111,6 +121,7 @@ def decompose_text(
     text: str,                        # The module source text
     content_hash: Optional[str] = None,  # Precomputed file hash (else hashed over the UTF-8 text)
     import_name: Optional[str] = None,   # Override the derived dotted import name
+    symbol_identity: Any = None,      # Optional identity hook (qualname -> birth fields; see `_build_symbols`) — container-independent ids (36f649d3)
 ) -> DecomposedModule:  # The decomposed module
     """Parse + bind in one step from in-memory source text."""
     ch = content_hash if content_hash is not None else SourceRef.compute_hash(text.encode("utf-8"))
@@ -121,7 +132,7 @@ def decompose_text(
         docstring=parsed.docstring, imports=list(parsed.imports),
         import_bindings=list(parsed.module_used_bindings),
     )
-    symbols, defines = _build_symbols(module, parsed, ch, path)
+    symbols, defines = _build_symbols(module, parsed, ch, path, symbol_identity=symbol_identity)
 
     # Verbatim-region overlay (the authoring / round-trip substrate): attach each
     # top-level symbol's VERBATIM body + order, mint CodeText nodes for the non-def
@@ -155,12 +166,14 @@ def decompose_file(
     repo_key: str,    # The repo's durable conceptual slug
     path: str,        # Path to the .py file
     repo_root: str,   # Repo root (for the repo-relative module path)
+    symbol_identity_for: Any = None,  # Optional factory: module_path -> the module's identity hook (see `decompose_text`)
 ) -> DecomposedModule:  # The decomposed module
     """Read a `.py` file and decompose it (hash over the raw file bytes)."""
     raw = Path(path).read_bytes()
     mp = module_path_for(path, repo_root)
     return decompose_text(repo_key, mp, str(path), raw.decode("utf-8"),
-                          content_hash=SourceRef.compute_hash(raw))
+                          content_hash=SourceRef.compute_hash(raw),
+                          symbol_identity=symbol_identity_for(mp) if symbol_identity_for else None)
 
 
 def iter_py_files(
@@ -178,12 +191,14 @@ def decompose_paths(
     repo_key: str,           # The repo's durable conceptual slug
     paths: Iterable[str],    # The .py files to decompose
     repo_root: str,          # Repo root (for repo-relative module paths)
+    symbol_identity_for: Any = None,  # Optional factory: module_path -> the module's identity hook (see `decompose_text`)
 ) -> List[DecomposedModule]:  # One DecomposedModule per parseable file
     """Decompose an explicit set of files; unparseable files are skipped (recorded by the caller)."""
     out: List[DecomposedModule] = []
     for path in paths:
         try:
-            out.append(decompose_file(repo_key, path, repo_root))
+            out.append(decompose_file(repo_key, path, repo_root,
+                                      symbol_identity_for=symbol_identity_for))
         except SyntaxError:
             continue
     return out
@@ -193,10 +208,12 @@ def decompose_package(
     repo_key: str,                    # The repo's durable conceptual slug
     package_dir: str,                 # The importable package directory (e.g. ".../cjm_dev_graph_schema")
     repo_root: Optional[str] = None,  # Repo root for relative module paths (default = package_dir's parent)
+    symbol_identity_for: Any = None,  # Optional factory: module_path -> the module's identity hook (see `decompose_text`)
 ) -> List[DecomposedModule]:  # The decomposed package modules
     """Decompose every `.py` under a package dir (the lib's own importable source).
 
     `repo_root` defaults to the package dir's parent, so module paths read like
     `cjm_dev_graph_schema/nodes.py` (the importable form)."""
     root = repo_root if repo_root is not None else str(Path(package_dir).parent)
-    return decompose_paths(repo_key, iter_py_files(package_dir), root)
+    return decompose_paths(repo_key, iter_py_files(package_dir), root,
+                           symbol_identity_for=symbol_identity_for)

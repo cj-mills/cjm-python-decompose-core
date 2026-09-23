@@ -134,3 +134,36 @@ def test_external_imports_not_minted():
     d = decompose_text("demo-repo", "demo/c.py", "/abs/c.py", src, import_name="demo.c")
     _, edges = corpus_graph_elements([d])
     assert [e for e in edges if e["relation_type"] == DevRelations.IMPORTS] == []
+
+
+def test_symbol_identity_hook_keeps_the_birth_id_and_covers_nested_symbols():
+    # The container-independent identity hook (36f649d3): a class re-homed from a.py keeps
+    # a.py's id in b.py, its methods derive from the same birth address, and a symbol the
+    # hook does not name is simply born here.
+    born = decompose_text("cjm-demo", "demo/a.py", "/tmp/a.py",
+                          "class Thing:\n    def m(self):\n        return 1\n")
+    born_ids = {s.qualname: s.id for s in born.symbols}
+
+    def hook(qualname):
+        if qualname.split(".")[0] == "Thing":
+            return {"birth_repo_key": "cjm-demo", "birth_module_path": "demo/a.py",
+                    "birth_qualname": "Thing" + qualname[len("Thing"):], "generation": 0}
+        return None
+
+    moved = decompose_text("cjm-demo", "demo/b.py", "/tmp/b.py",
+                           "class Thing:\n    def m(self):\n        return 1\n\n\n"
+                           "def fresh():\n    return 2\n",
+                           symbol_identity=hook)
+    ids = {s.qualname: s.id for s in moved.symbols}
+    assert ids["Thing"] == born_ids["Thing"] and ids["Thing.m"] == born_ids["Thing.m"]
+    assert ids["fresh"] not in born_ids.values()
+    assert moved.module.id != born.module.id
+    # The DEFINES edges name the kept ids (the hook ran BEFORE the edges were built).
+    defines = {(e["source_id"], e["target_id"]) for e in moved.local_edges
+               if e["relation_type"] == DevRelations.DEFINES}
+    assert (moved.module.id, ids["Thing"]) in defines and (ids["Thing"], ids["Thing.m"]) in defines
+    # The birth fields ride the wire; a symbol born here carries none.
+    thing = next(s.to_graph_node() for s in moved.symbols if s.qualname == "Thing")
+    assert thing["properties"]["birth_module_path"] == "demo/a.py"
+    fresh = next(s.to_graph_node() for s in moved.symbols if s.qualname == "fresh")
+    assert "birth_module_path" not in fresh["properties"]

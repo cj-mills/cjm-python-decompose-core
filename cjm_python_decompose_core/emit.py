@@ -241,8 +241,27 @@ def _label_of(node: Any) -> str:
 
 
 def _looks_like_docstring(text: str) -> bool:
-    """Whether a text region opens with a string literal (a module docstring)."""
-    return text.lstrip().startswith(('"""', "'''", '"', "'"))
+    """Whether a text region is the module PREAMBLE the derived import block must follow.
+
+    True when the region opens with a string literal (the module docstring), when comment
+    lines — a shebang, an encoding cookie, a license header — lead into one, or when the
+    region is comments only. AST-located like `_strip_import_lines`: the first STATEMENT
+    decides, so `#!/usr/bin/env python3` above a docstring no longer reads as "not a
+    docstring" (the cascade_manifests.py capture landed the import block at line 1, above
+    the shebang AND the docstring — the shebang stopped working and the docstring became
+    a bare expression; housekeeping sitting 2026-09-23). A region `ast.parse` rejects
+    falls back to the same test with comment lines removed."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        stripped = "\n".join(ln for ln in text.splitlines()
+                             if not ln.lstrip().startswith("#")).lstrip()
+        return (not stripped) or stripped.startswith(('"""', "'''", '"', "'"))
+    if not tree.body:
+        return bool(text.strip())  # comments only (a shebang / header with no statements)
+    first = tree.body[0]
+    return (isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant)
+            and isinstance(first.value.value, str))
 
 
 _IMPORT_LINE = re.compile(r"\s*(from|import)\s")
