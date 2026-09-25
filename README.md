@@ -11,12 +11,6 @@ A Python source-code decomposition core for context graphs: parses .py modules (
 - **`cjm_python_decompose_core.extract`** — Bind parsed Python onto dev-graph-schema code nodes (the dev-domain binding).
 - **`cjm_python_decompose_core.ingest`** — Flatten a decomposed Python corpus into graph elements (the queue-free half).
 - **`cjm_python_decompose_core.parse`** — Schema-free Python parsing (stdlib `ast`).
-- **`tests.test_extract_ingest`** — Extract (parse -> schema nodes) + ingest (corpus -> graph elements) binding.
-- **`tests.test_imports_emit`** — Imports-as-projection: deriving a module's canonical import block from bindings.
-- **`tests.test_method_attribution`** — First-param capture + monkey-patch-assignment detection (the cross-cell method idioms).
-- **`tests.test_parse`** — Schema-free Python parsing: docstrings, imports, the symbol tree, and calls.
-- **`tests.test_regions_emit`** — Verbatim region decomposition + canonical emit (the authoring / round-trip substrate).
-- **`tests_manual.imports_projection`** — Imports-as-projection faithfulness sweep over the real arc libs (corpus harness).
 
 ## API
 
@@ -59,72 +53,7 @@ A Python source-code decomposition core for context graphs: parses .py modules (
 - `parse_module` _function_ — Parse Python source into module docstring + imports + the symbol tree.
 - `parse_regions` _function_ — Decompose a module into ordered verbatim top-level regions (the round-trip substrate).
 
-### `tests.test_extract_ingest`
-
-- `test_corpus_imports_and_calls_resolve_intra_corpus` _function_
-- `test_decompose_text_builds_module_and_symbols` _function_
-- `test_external_imports_not_minted` _function_
-- `test_import_map_and_call_map` _function_
-- `test_ingest_is_idempotent_in_ids` _function_
-- `test_local_edges_about_repo_and_defines_nesting` _function_
-- `test_module_path_and_import_name` _function_
-- `test_resolve_import_relative_and_absolute` _function_
-
-### `tests.test_imports_emit`
-
-- `test_coexisting_submodule_imports_both_survive_round_trip` _function_ — import urllib.request + import urllib.error both bind `urllib` and both are
-- `test_derived_block_is_faithful_and_prunes_dead_imports` _function_
-- `test_docstring_lines_starting_with_from_survive_derive` _function_
-- `test_emit_module_default_is_verbatim_not_derived` _function_
-- `test_emit_module_derive_imports_prunes_dead_and_keeps_bodies` _function_
-- `test_parameter_default_reference_is_not_pruned` _function_
-- `test_rebinding_imports_still_supersede` _function_ — Aliased / from-imports rebinding a name follow Python last-binding-wins —
-- `test_render_binding_forms` _function_
-- `test_render_import_block_orders_dedups_and_groups` _function_
-- `test_render_import_block_wraps_long_from_lines_in_aligned_parens` _function_
-- `test_same_module_imported_twice_dedupes` _function_ — A literally duplicated plain import collapses to one statement.
-
-### `tests.test_method_attribution`
-
-- `test_first_param_and_annotation_captured` _function_
-- `test_first_param_forward_ref_annotation` _function_
-- `test_first_param_unannotated_and_classes_have_none` _function_
-- `test_monkeypatch_assignments_detected` _function_
-- `test_monkeypatch_is_structural_filtering_is_downstream` _function_
-- `test_no_arg_function_has_empty_first_param` _function_
-
-### `tests.test_parse`
-
-- `parsed` _function_
-- `test_class_methods_are_children_with_method_kind` _function_
-- `test_empty_and_docstringless_module` _function_
-- `test_function_calls_are_direct_only` _function_
-- `test_import_bindings_per_symbol_and_module_level` _function_
-- `test_imports_collected_with_relative_and_submodule_forms` _function_
-- `test_iter_symbols_flattens_parents_before_children` _function_
-- `test_local_import_not_hoisted_to_bindings` _function_
-- `test_method_calls` _function_
-- `test_module_docstring_first_line` _function_
-- `test_nested_function_is_its_own_symbol_with_own_calls` _function_
-- `test_refs_are_superset_of_calls_capturing_bases_and_annotations` _function_
-- `test_syntax_error_propagates` _function_
-- `test_top_level_symbols` _function_
-
-### `tests.test_regions_emit`
-
-- `test_codetext_regions_cover_the_non_def_source` _function_
-- `test_decompose_attaches_body_and_order_to_top_level_symbols` _function_
-- `test_decompose_emit_round_trip_from_nodes` _function_
-- `test_emit_is_ast_equal_and_seam_canonical_on_messy_input` _function_
-- `test_emit_regions_round_trips_pep8_byte_exact` _function_
-- `test_parse_regions_orders_symbols_and_text` _function_
-- `test_symbol_body_is_verbatim_with_decorators_and_leading_comments` _function_
-
-### `tests_manual.imports_projection`
-
-- `sweep` _function_ — Decompose every arc-lib module and tally false prunes + genuine dead-import prunes.
-
 ## Dependencies
 
-**Depends on:** `cjm-dev-graph-schema`
+**Depends on:** `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-dev-graph-schema`
 **Used by:** `cjm-context-graph-projection`, `cjm-notebook-decompose-core`
