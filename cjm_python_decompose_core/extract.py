@@ -28,6 +28,7 @@ class DecomposedModule:
     (which need every module's import-name / every symbol's name to be known).
     `texts` are the non-def verbatim regions (the round-trip substrate between symbols);
     the module's CONTAINS edges (in `local_edges`) order all top-level regions for emit."""
+
     module: CodeModuleNode               # The CodeModule node
     symbols: List[CodeSymbolNode]        # All symbols, flattened (every nesting level)
     local_edges: List[Dict[str, Any]] = field(default_factory=list)  # ABOUT + structural DEFINES + CONTAINS edges

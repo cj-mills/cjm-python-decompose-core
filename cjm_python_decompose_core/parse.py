@@ -22,6 +22,7 @@ _DEF_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 @dataclass
 class ParsedSymbol:
     """One definition within a module (function/class/method), with its nesting."""
+
     qualname: str                      # Dotted name within the module (e.g. "EntityNode.to_graph_node")
     name: str                          # Bare name (the last qualname segment)
     kind: str                          # "function" | "class" | "method"
@@ -39,6 +40,7 @@ class ParsedSymbol:
 @dataclass
 class ParsedModule:
     """The structural decomposition of one Python module."""
+
     docstring: str = ""                # First non-empty line of the module docstring
     imports: List[str] = field(default_factory=list)  # Imported module names (dotted; relative kept as ".pkg"), dedup/order-preserved
     symbols: List[ParsedSymbol] = field(default_factory=list)  # Top-level symbols (each may carry children)
@@ -402,6 +404,7 @@ def iter_symbols(
 @dataclass
 class SourceRegion:
     """One ordered top-level region of a module, held verbatim (symbol or text)."""
+
     kind: str               # "symbol" (a def/class) | "text" (a non-def run)
     text: str               # The region's VERBATIM source (trailing blank lines trimmed; emit re-adds seams)
     start_line: int         # 1-based first source line of the region
