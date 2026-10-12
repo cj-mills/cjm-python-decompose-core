@@ -2,7 +2,8 @@
 
 import pytest
 
-from cjm_python_decompose_core.elements import compose_elements, compose_module, decompose_elements, lift_imports
+from cjm_python_decompose_core.elements import (compose_elements, compose_module, decompose_elements, lift_imports,
+                                                unresolved_names)
 from cjm_python_decompose_core.emit import render_import_block, sibling_modules
 
 SRC = '''"""Module docstring."""
@@ -182,3 +183,18 @@ def test_a_sibling_outranks_the_stdlib_name_it_shadows():
     assert render_import_block(b, frozenset({"platform"})) == "import platform"
     two = b + [{"name": "os", "kind": "import", "module": "os", "imported": "", "alias": "", "level": 0}]
     assert render_import_block(two, frozenset({"platform"})) == "import os\n\nimport platform"
+
+
+def test_unresolved_names_reads_every_scope_against_the_module_bindings():
+    text = (
+        "import os\n"
+        "try:\n    import yaml\nexcept ImportError:\n    yaml = None\n"
+        "LIMIT = 1\n\n\n"
+        "def run(p, *a):\n    global STATE\n    STATE = 2\n"
+        "    def inner():\n        return p + gone\n"
+        "    return os.sep, yaml, LIMIT, STATE, inner, [q for q in a if q in missing], print, __file__\n\n\n"
+        "class Fake(Base):\n    size = LIMIT\n\n    def m(self):\n        return attr\n\n\n"
+        "assert other\n")
+    assert unresolved_names(text) == {"gone", "missing", "Base", "attr", "other"}
+    assert unresolved_names("import os\n\n\ndef f():\n    return os\n") == set()
+    assert unresolved_names("from x import *\n\n\ndef f():\n    return y\n") is None  # unknowable

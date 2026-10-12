@@ -28,7 +28,9 @@ invariant, as the round trip is the snapshot regime's.
 """
 
 import ast
+import builtins
 import io
+import symtable
 import tokenize
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -308,6 +310,38 @@ def compose_module(
     block = render_import_block(binding_union(elements), local)
     return compose_elements([CodeElement(e.kind, block, e.depth, e.parent, e.qualname, e.symbol_kind,
                                          e.bindings) if e.kind == IMPORTS else e for e in elements])
+
+
+# Names every module holds without binding them: the interpreter sets them on the module object.
+MODULE_NAMES = frozenset({"__annotations__", "__builtins__", "__cached__", "__dict__", "__doc__", "__file__",
+                          "__loader__", "__name__", "__package__", "__path__", "__spec__"})
+
+
+def unresolved_names(
+    text: str,  # A module's source
+) -> Optional[set]:  # The names it reads that nothing binds; None when a star import makes that unknowable
+    """The names a module reads that no module-level binding (an import, an assignment, a def or class,
+    a `global` declaration that assigns), builtin or module attribute covers -- in any scope: a name a
+    function, class body or comprehension reads from the module (`symtable`'s implicit globals) and a
+    name the module body itself reads. The binding check of abfc2829 (2): such a name raises NameError
+    when the code runs. A `from x import *` binds names no parse can see, so the check cannot run."""
+    if any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names) for n in ast.walk(ast.parse(text))):
+        return None
+    top = symtable.symtable(text, "<module>", "exec")
+    syms = top.get_symbols()
+    bound = {s.get_name() for s in syms if s.is_assigned() or s.is_imported() or s.is_declared_global()}
+    reads: List[str] = [s.get_name() for s in syms if s.is_referenced()]
+    tables = list(top.get_children())
+    while tables:
+        t = tables.pop()
+        tables.extend(t.get_children())
+        for s in t.get_symbols():
+            if s.is_declared_global() and s.is_assigned():
+                bound.add(s.get_name())
+            elif s.is_global() and not s.is_declared_global() and s.is_referenced():
+                reads.append(s.get_name())
+    known = bound | set(dir(builtins)) | MODULE_NAMES
+    return {n for n in reads if n not in known}
 
 
 @dataclass
