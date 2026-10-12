@@ -2,8 +2,8 @@
 
 import ast
 
-from cjm_python_decompose_core.extract import decompose_text
 from cjm_python_decompose_core.emit import emit_module_from_nodes
+from cjm_python_decompose_core.extract import decompose_text
 from cjm_python_decompose_core.parse import emit_regions, parse_regions
 
 SRC = '''"""Module docstring."""

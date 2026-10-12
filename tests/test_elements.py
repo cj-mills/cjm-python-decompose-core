@@ -1,9 +1,8 @@
 """The element source unit: decompose a module into elements, compose it back (abfc2829 (1); d26e00f9; 3e155cd6)."""
 
 import pytest
-
-from cjm_python_decompose_core.elements import (compose_elements, compose_module, decompose_elements, lift_imports,
-                                                unresolved_names)
+from cjm_python_decompose_core.elements import (compose_elements, compose_module,
+                                                decompose_elements, lift_imports, unresolved_names)
 from cjm_python_decompose_core.emit import render_import_block, sibling_modules
 
 SRC = '''"""Module docstring."""

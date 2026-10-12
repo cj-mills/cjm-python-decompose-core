@@ -2,9 +2,7 @@
 
 from cjm_dev_graph_schema.identity import entity_node_id
 from cjm_dev_graph_schema.vocab import DevNodeKinds, DevRelations
-
-from cjm_python_decompose_core.extract import (decompose_text, import_name_for,
-                                               module_path_for)
+from cjm_python_decompose_core.extract import decompose_text, import_name_for, module_path_for
 from cjm_python_decompose_core.ingest import (build_call_map, build_import_map,
                                               corpus_graph_elements, resolve_import)
 

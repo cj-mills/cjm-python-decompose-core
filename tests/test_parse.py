@@ -1,8 +1,7 @@
 """Schema-free Python parsing: docstrings, imports, the symbol tree, and calls."""
 
 import pytest
-
-from cjm_python_decompose_core.parse import (ParsedModule, iter_symbols, parse_module)
+from cjm_python_decompose_core.parse import iter_symbols, parse_module, ParsedModule
 
 SRC = '''"""Module docstring first line.
 
