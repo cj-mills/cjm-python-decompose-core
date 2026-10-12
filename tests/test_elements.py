@@ -2,7 +2,8 @@
 
 import pytest
 
-from cjm_python_decompose_core.elements import compose_elements, decompose_elements
+from cjm_python_decompose_core.elements import compose_elements, compose_module, decompose_elements, lift_imports
+from cjm_python_decompose_core.emit import render_import_block, sibling_modules
 
 SRC = '''"""Module docstring."""
 import os
@@ -100,3 +101,84 @@ def test_a_body_on_the_header_line_is_a_leaf():
 def test_a_code_line_shallower_than_its_member_is_refused():
     with pytest.raises(ValueError, match="shallower"):
         decompose_elements("class A:\n    def f(self):\n        x = [\n1]\n        return x\n")
+
+
+MOD = '''"""Tests of a store."""
+
+import os
+import sys
+
+import pytest
+
+from _helpers import make_store
+from conftest import tmp_store
+
+pytestmark = pytest.mark.slow
+
+
+class FakeDeps:
+    name = "fake"
+
+    def path(self):
+        return os.getcwd()
+
+
+def test_open(tmp_store):
+    assert make_store(tmp_store)
+'''
+
+
+def test_lift_gives_each_binding_to_the_elements_naming_it():
+    lifted = lift_imports(MOD)
+    by = {(e.kind, e.qualname or e.text.split("\\n")[0]): sorted(b["name"] for b in e.bindings)
+          for e in lifted.elements}
+    assert by[("text", "pytestmark = pytest.mark.slow")] == ["pytest"]
+    assert by[("symbol", "FakeDeps.path")] == ["os"]
+    assert by[("symbol", "test_open")] == ["make_store", "tmp_store"]  # a fixture claimed by parameter
+    assert by[("imports", "")] == ["sys"]  # no element names it: unclaimed, kept on the imports element
+    assert [e.kind for e in lifted.elements][:2] == ["text", "imports"]  # the derived slot: after the docstring
+
+
+def test_compose_renders_the_block_with_a_local_section_and_lift_reproduces_the_elements():
+    lifted = lift_imports(MOD)
+    composed = compose_module(lifted.elements, frozenset({"_helpers", "conftest"}))
+    assert composed == MOD  # the author's grouping is the derived rule: stdlib, third-party, local
+    again = lift_imports(composed)
+    assert [(e.kind, e.depth, e.parent, e.text, e.bindings) for e in again.elements] == \
+           [(e.kind, e.depth, e.parent, e.text, e.bindings) for e in lifted.elements]
+
+
+def test_without_siblings_the_local_imports_sort_as_third_party():
+    composed = compose_module(lift_imports(MOD).elements)
+    assert "import pytest\nfrom _helpers import make_store\nfrom conftest import tmp_store\n" in composed
+
+
+def test_an_import_after_a_statement_stays_verbatim_in_source_order():
+    src = ('import os\n\nos.environ.setdefault("QT_QPA_PLATFORM", "offscreen")\n'
+           'from PySide6.QtWidgets import QApplication\n\n\ndef test_app():\n    return QApplication\n')
+    lifted = lift_imports(src)
+    texts = [e.text for e in lifted.elements if e.kind == "text"]
+    assert texts == ['os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")\n'
+                     'from PySide6.QtWidgets import QApplication']
+    assert compose_module(lifted.elements) == src
+
+
+def test_the_lift_reports_which_regions_it_empties():
+    lifted = lift_imports(MOD)
+    # regions: 0 docstring, 1-3 the three import groups, 4 pytestmark, ...
+    assert lifted.imports_origin == 1 and lifted.emptied == [1, 2, 3]
+    assert lifted.origins[0] == 0 and lifted.origins[2] == 4
+
+
+def test_sibling_modules_only_outside_a_package():
+    paths = {"tests/test_a.py", "tests/conftest.py", "tests/_helpers.py", "tests/util/__init__.py",
+             "pkg/__init__.py", "pkg/platform.py", "pkg/config.py"}
+    assert sibling_modules("tests/test_a.py", paths) == {"conftest", "_helpers", "util"}
+    assert sibling_modules("pkg/config.py", paths) == frozenset()  # inside a package: `import platform` is the stdlib's
+
+
+def test_a_sibling_outranks_the_stdlib_name_it_shadows():
+    b = [{"name": "platform", "kind": "import", "module": "platform", "imported": "", "alias": "", "level": 0}]
+    assert render_import_block(b, frozenset({"platform"})) == "import platform"
+    two = b + [{"name": "os", "kind": "import", "module": "os", "imported": "", "alias": "", "level": 0}]
+    assert render_import_block(two, frozenset({"platform"})) == "import os\n\nimport platform"

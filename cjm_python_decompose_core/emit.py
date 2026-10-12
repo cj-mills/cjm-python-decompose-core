@@ -59,12 +59,44 @@ def _from_name(b: Dict[str, Any]) -> str:
 _IMPORT_WRAP_WIDTH = 100  # A from-import line longer than this wraps in aligned parentheses
 
 
-def _import_section(level: int, module: str) -> int:
-    """The isort-style section a binding sorts into: 0 stdlib · 1 third-party · 2 relative."""
+def _import_section(
+    level: int,                   # The binding's relative level (0 = absolute)
+    module: str,                  # Its dotted source module
+    local: frozenset = frozenset(),  # The module's sibling module names (`sibling_modules`)
+) -> int:  # 0 stdlib · 1 third-party · 2 local · 3 relative
+    """The isort-style section a binding sorts into. A sibling outranks the stdlib: in a directory
+    that is no package, Python puts the directory first on sys.path, so a sibling shadows a
+    stdlib module of the same name (ruling 21b8fcca (b))."""
     if level:
-        return 2
+        return 3
     top = (module or "").split(".")[0]
+    if top in local:
+        return 2
     return 0 if top in sys.stdlib_module_names else 1
+
+
+def sibling_modules(
+    module_path: str,      # Repo-relative path of the module being rendered
+    paths: Any,            # Repo-relative paths of the live modules of its repo
+) -> frozenset:  # The names a bare import of a sibling binds (empty inside a package)
+    """The modules a bare import in `module_path` reaches as siblings: `<dir>/<name>.py` and
+    `<dir>/<name>/__init__.py` beside it. Only in a directory that is NO package (tests/, scripts/:
+    Python or pytest puts the directory itself on sys.path) -- inside a package a bare import is
+    absolute, so `import platform` beside a `platform.py` still means the stdlib's."""
+    parent, _, own = module_path.rpartition("/")
+    prefix = f"{parent}/" if parent else ""
+    if f"{prefix}__init__.py" in paths:
+        return frozenset()
+    out = set()
+    for p in paths:
+        if not p.startswith(prefix):
+            continue
+        rest = p[len(prefix):]
+        if rest.endswith("/__init__.py") and rest.count("/") == 1:
+            out.add(rest.split("/")[0])
+        elif "/" not in rest and rest.endswith(".py") and rest not in (own, "__init__.py"):
+            out.add(rest[:-3])
+    return frozenset(out)
 
 
 def _render_from_line(level: int, module: str, names: List[str]) -> str:
@@ -90,13 +122,14 @@ def _render_from_line(level: int, module: str, names: List[str]) -> str:
 
 def render_import_block(
     bindings: List[Dict[str, Any]],  # Import-binding descriptors (per-symbol + module-level, unioned)
+    local: frozenset = frozenset(),  # The module's sibling module names (`sibling_modules`): their own section
 ) -> str:  # The canonical import block text ("" when none)
     """Derive a module's canonical import block from its used import bindings.
 
     The imports-as-projection emit: the block is GENERATED from the bindings the module's
     symbols actually use (so an unused import is auto-pruned), deterministically ordered —
     `from __future__` first, then isort-style SECTIONS separated by a blank line (stdlib,
-    third-party, relative — classified via `sys.stdlib_module_names`), each section's
+    third-party, local siblings, relative — classified via `sys.stdlib_module_names` and `local`), each section's
     `import` statements before its `from` imports, all sorted by module; same-source `from`
     imports MERGE onto one line, parenthesized+aligned when over-width. Faithful at the SET
     level (the round-trip bar is semantic equality of the import set, not byte-identity to
@@ -115,17 +148,17 @@ def render_import_block(
     for b in uniq:
         level, module = b.get("level", 0), b.get("module") or ""
         if b.get("kind") == "import":
-            plain_by_section.setdefault(_import_section(level, module), []).append(b)
+            plain_by_section.setdefault(_import_section(level, module, local), []).append(b)
         elif module == "__future__" and not level:
             future.append(_from_name(b))
         else:
-            from_groups.setdefault((_import_section(level, module), level, module),
+            from_groups.setdefault((_import_section(level, module, local), level, module),
                                    []).append(_from_name(b))
 
     sections: List[List[str]] = []
     if future:
         sections.append([f"from __future__ import {', '.join(sorted(set(future)))}"])
-    for sec in (0, 1, 2):
+    for sec in (0, 1, 2, 3):
         lines: List[str] = []
         for b in sorted(plain_by_section.get(sec, []), key=lambda x: (x.get("module") or "").lower()):
             lines.append(render_binding(b))
