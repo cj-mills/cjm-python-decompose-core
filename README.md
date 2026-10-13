@@ -7,6 +7,7 @@ A Python source-code decomposition core for context graphs: parses .py modules (
 ## Modules
 
 - **`cjm_python_decompose_core.__init__`**
+- **`cjm_python_decompose_core.elements`** — The element source unit for Python modules (design abfc2829 (1); d26e00f9; 3e155cd6).
 - **`cjm_python_decompose_core.emit`** — Project a module BACK out of the graph (graph -> .py) — the canonical emit leg.
 - **`cjm_python_decompose_core.extract`** — Bind parsed Python onto dev-graph-schema code nodes (the dev-domain binding).
 - **`cjm_python_decompose_core.ingest`** — Flatten a decomposed Python corpus into graph elements (the queue-free half).
@@ -14,15 +15,30 @@ A Python source-code decomposition core for context graphs: parses .py modules (
 
 ## API
 
+### `cjm_python_decompose_core.elements`
+
+- `CodeElement` _class_ — One element of a module, its text at depth 0.
+- `LiftedModule` _class_ — A module decomposed in the element regime: its elements (one `imports` element among them,
+- `binding_union` _function_ — The union of a module's bindings -- the input the import block renders from.
+- `class_members` _function_ — A class's members as 0-based inclusive line spans: the class's own text ends at `anchor`,
+- `compose_elements` _function_ — Compose elements back into a module: members re-indented by depth, every seam derived.
+- `compose_module` _function_ — Compose a captured module: the imports element's text is rendered from the union of every
+- `decompose_elements` _function_ — Decompose a module into elements -- top-level regions, then class members recursively. A
+- `element_names` _function_ — The names an element's own text uses -- what claims an import binding (abfc2829 (3): a binding
+- `import_slot` _function_ — The import block's derived slot: after a leading docstring or comment preamble, else first --
+- `lift_imports` _function_ — Decompose a module in the element regime: lift its leading run of imports (after the module
+- `string_lines` _function_ — The lines a string literal continues onto -- their whitespace is the string's value.
+- `string_reads` _function_ — The names an element reads through a STRING -- a fixture string (`usefixtures("db")`,
+- `unresolved_names` _function_ — The names a module reads that no module-level binding (an import, an assignment, a def or class,
+
 ### `cjm_python_decompose_core.emit`
 
-- `emit_module_from_nodes` _function_ — Reassemble a module's canonical `.py` source from its graph nodes (the round-trip).
-- `module_used_bindings` _function_ — Union of every contained symbol's import bindings + the module-level ones (+ any
+- `emit_module_from_nodes` _function_ — Reassemble a module's `.py` source from its graph nodes (the round-trip): its ordered
 - `nodes_for_module` _function_ — Filter queried region nodes down to one module (by `module_id` property).
 - `regions_from_nodes` _function_ — Collect a module's top-level regions from its nodes, ordered by `order_index`.
 - `render_binding` _function_ — Render one import-binding descriptor back to its canonical import statement.
-- `render_import_block` _function_ — Derive a module's canonical import block from its used import bindings.
-- `synth_import` _function_ — A synthetic `from <import_name> import <local_name>` binding (USES-derived).
+- `render_import_block` _function_ — Render a module's canonical import block from its import bindings (the element regime's
+- `sibling_modules` _function_ — The modules a bare import in `module_path` reaches as siblings: `<dir>/<name>.py` and
 
 ### `cjm_python_decompose_core.extract`
 
@@ -47,13 +63,15 @@ A Python source-code decomposition core for context graphs: parses .py modules (
 - `ParsedModule` _class_ — The structural decomposition of one Python module.
 - `ParsedSymbol` _class_ — One definition within a module (function/class/method), with its nesting.
 - `SourceRegion` _class_ — One ordered top-level region of a module, held verbatim (symbol or text).
+- `accessor_of` _function_ — Whether a def continues the accessor chain of the def directly before it: `@<name>.setter`,
 - `emit_regions` _function_ — Reassemble ordered regions into canonical `.py` source — the graph owns formatting.
 - `iter_symbols` _function_ — Flatten the symbol tree depth-first (parent before its children).
 - `monkeypatch_assignments` _function_ — Top-level monkey-patch assignments: `Class.method = func` (the incremental-class idiom).
 - `parse_module` _function_ — Parse Python source into module docstring + imports + the symbol tree.
 - `parse_regions` _function_ — Decompose a module into ordered verbatim top-level regions (the round-trip substrate).
+- `source_lines` _function_ — Split source where the tokenizer counts lines -- at \n, \r\n and \r only. `str.splitlines` also
 
 ## Dependencies
 
 **Depends on:** `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-dev-graph-schema`
-**Used by:** `cjm-context-graph-projection`, `cjm-notebook-decompose-core`
+**Used by:** `cjm-context-graph-projection`, `cjm-notebook-decompose-core`, `cjm-substrate`
