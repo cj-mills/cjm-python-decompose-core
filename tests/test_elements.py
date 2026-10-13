@@ -197,3 +197,24 @@ def test_unresolved_names_reads_every_scope_against_the_module_bindings():
     assert unresolved_names(text) == {"gone", "missing", "Base", "attr", "other"}
     assert unresolved_names("import os\n\n\ndef f():\n    return os\n") == set()
     assert unresolved_names("from x import *\n\n\ndef f():\n    return y\n") is None  # unknowable
+
+
+def test_a_property_accessor_chain_is_one_symbol_element():
+    text = ("class Form:\n    @property\n    def row(self) -> int:\n        return self._row\n\n"
+            "    @row.setter\n    def row(self, i: int) -> None:\n        self._row = i\n\n"
+            "    def reset(self):\n        self.row = 0\n")
+    els = decompose_elements(text)
+    assert [(e.kind, e.qualname) for e in els] == [("symbol", "Form"), ("symbol", "Form.row"),
+                                                   ("symbol", "Form.reset")]
+    assert els[1].text.startswith("@property\n") and "\n\n@row.setter\n" in els[1].text
+    assert compose_elements(els) == text
+
+
+def test_two_definitions_of_one_qualname_are_refused_by_name():
+    with pytest.raises(ValueError, match="two definitions of Form.row"):
+        decompose_elements("class Form:\n    def row(self):\n        return 1\n\n    def row(self):\n        return 2\n")
+    with pytest.raises(ValueError, match="two definitions of f "):
+        decompose_elements("def f():\n    return 1\n\n\ndef f():\n    return 2\n")
+    with pytest.raises(ValueError, match="two definitions of Form.row"):  # a setter not after its getter
+        decompose_elements("class Form:\n    @property\n    def row(self):\n        return 1\n\n"
+                           "    x = 1\n\n    @row.setter\n    def row(self, i):\n        pass\n")

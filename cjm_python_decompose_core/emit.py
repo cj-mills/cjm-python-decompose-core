@@ -18,7 +18,7 @@ import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from .parse import emit_regions, SourceRegion
+from .parse import emit_regions, source_lines, SourceRegion
 
 _SYMBOL_LABELS = {"CodeSymbol"}
 _TEXT_LABELS = {"CodeText"}
@@ -317,7 +317,7 @@ def _strip_import_lines(text: str) -> str:  # The region text with top-level imp
     for node in tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             drop.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
-    return "\n".join(ln for i, ln in enumerate(text.splitlines(), 1) if i not in drop)
+    return "\n".join(ln for i, ln in enumerate(source_lines(text), 1) if i not in drop)
 
 
 def _strip_import_lines_regex(text: str) -> str:  # The pre-AST fallback (unparseable region)

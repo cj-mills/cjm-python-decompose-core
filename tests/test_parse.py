@@ -185,3 +185,13 @@ def test_empty_and_docstringless_module():
 def test_syntax_error_propagates():
     with pytest.raises(SyntaxError):
         parse_module("def (:\n")
+
+
+def test_a_property_accessor_chain_parses_as_one_symbol():
+    src = ("class Form:\n    @property\n    def row(self) -> int:\n        \"\"\"The cursor row.\"\"\"\n"
+           "        return self._row\n\n    @row.setter\n    def row(self, i: int) -> None:\n"
+           "        self._row = clamp(i)\n")
+    (form,) = parse_module(src).symbols
+    (row,) = form.children
+    assert (row.qualname, row.lineno, row.docstring) == ("Form.row", 3, "The cursor row.")
+    assert row.decorators == ["property", "setter"] and "clamp" in row.calls and "clamp" in row.refs

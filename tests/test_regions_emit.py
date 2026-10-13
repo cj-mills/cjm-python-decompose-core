@@ -4,7 +4,7 @@ import ast
 
 from cjm_python_decompose_core.emit import emit_module_from_nodes
 from cjm_python_decompose_core.extract import decompose_text
-from cjm_python_decompose_core.parse import emit_regions, parse_regions
+from cjm_python_decompose_core.parse import emit_regions, parse_regions, source_lines
 
 SRC = '''"""Module docstring."""
 import os
@@ -80,3 +80,14 @@ def test_codetext_regions_cover_the_non_def_source():
     assert "docstring" in kinds and "code" in kinds
     joined = "\n".join(t.text for t in d.texts)
     assert "import os" in joined and "CONST = 1" in joined and '__name__ == "__main__"' in joined
+
+
+def test_a_raw_line_separator_in_a_literal_never_moves_a_region_boundary():
+    # str.splitlines breaks at U+2029 / U+2028 / \x0c ..., the tokenizer does not: a raw one in a
+    # literal must not shift the AST's line numbers off the text (design detail ed20aa51).
+    text = ('class Bar:\n    def find(self, s):\n        if "\u2029" in s:\n            s = s.strip()\n\n\n'
+            "        return s\n\n\nX = 1\n")
+    assert [(r.kind, r.text.split("\n")[-1]) for r in parse_regions(text)] == [
+        ("symbol", "        return s"), ("text", "X = 1")]
+    assert source_lines("a\u2029b\x0cc\r\nd\n") == ["a\u2029b\x0cc", "d"]
+    assert emit_regions(parse_regions(text)) == text

@@ -36,8 +36,8 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 from cjm_python_decompose_core.emit import _looks_like_docstring, render_import_block
-from cjm_python_decompose_core.parse import (_import_bindings, emit_regions, parse_regions,
-                                             SourceRegion)
+from cjm_python_decompose_core.parse import (_import_bindings, accessor_of, emit_regions,
+                                             parse_regions, SourceRegion)
 
 INDENT = 4  # One depth level: the corpus's only member indentation (492 of 492 classes)
 IMPORTS = "imports"  # The kind of a module's one import-block element (its text derived from bindings)
@@ -109,13 +109,16 @@ def class_members(
         return ln
 
     defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-    units, floor = [], anchor
+    units, floor, prev = [], anchor, None
     for s in members:
-        start = opens(s, floor)
-        is_def = isinstance(s, defs)
-        units.append([start, s.end_lineno - 1, is_def, is_def and start == s.end_lineno - 1,
-                      s if is_def else None])
-        floor = s.end_lineno - 1
+        if accessor_of(s, prev):  # a property's next accessor extends its unit: one attribute, one element
+            units[-1][1], units[-1][3] = s.end_lineno - 1, False
+        else:
+            start = opens(s, floor)
+            is_def = isinstance(s, defs)
+            units.append([start, s.end_lineno - 1, is_def, is_def and start == s.end_lineno - 1,
+                          s if is_def else None])
+        floor, prev = s.end_lineno - 1, s
     pieces, prev_end = [], anchor
     for i, u in enumerate(units):
         gap = range(prev_end + 1, u[0])
@@ -192,13 +195,23 @@ def _split_symbol(
 def decompose_elements(
     text: str,  # A module's source
 ) -> List[CodeElement]:  # Its elements in source order (pre-order: a class precedes its members)
-    """Decompose a module into elements -- top-level regions, then class members recursively."""
+    """Decompose a module into elements -- top-level regions, then class members recursively. A
+    symbol element is one qualname: a property's accessor chain is one element (`accessor_of`), and
+    any other two definitions of one qualname (an overload, a redefinition) raise ValueError -- one
+    id per element, so the writers refuse the text rather than guess (design detail ed20aa51 (2))."""
     out: List[CodeElement] = []
     for r in parse_regions(text):
         if r.kind == "symbol":
             _split_symbol(r.text, 0, None, "", out)
         else:
             out.append(CodeElement("text", r.text))
+    seen: set = set()
+    for e in out:
+        if e.kind == "symbol":
+            if e.qualname in seen:
+                raise ValueError(f"two definitions of {e.qualname} -- one element per qualname "
+                                 "(only a property's accessor chain shares one)")
+            seen.add(e.qualname)
     return out
 
 

@@ -12,8 +12,9 @@ decomposition here, the schema meeting in `extract`.
 """
 
 import ast
+import io
 from dataclasses import dataclass, field
-from typing import Iterator, List
+from typing import Iterator, List, Optional
 
 # Definition node types that become symbols (and that own their own call scope).
 _DEF_TYPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -264,6 +265,22 @@ def _used_bindings(
     return out
 
 
+def accessor_of(
+    node: ast.stmt,            # A statement in a class body
+    prev: Optional[ast.stmt],  # The statement directly before it in that body (None when it is the first)
+) -> bool:  # Whether `node` continues `prev`'s property -- one attribute, one symbol (design detail ed20aa51 (1))
+    """Whether a def continues the accessor chain of the def directly before it: `@<name>.setter`,
+    `.deleter` or `.getter` on a def of the same name. Python binds the chain into ONE attribute, so
+    the symbol walk (`_extract_symbols`) and the element split (`class_members`) both read it as one
+    symbol -- the two grains agree by construction."""
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef)
+    if not (isinstance(node, defs) and isinstance(prev, defs) and node.name == prev.name):
+        return False
+    return any(isinstance(d, ast.Attribute) and d.attr in ("setter", "deleter", "getter")
+               and isinstance(d.value, ast.Name) and d.value.id == node.name
+               for d in node.decorator_list)
+
+
 def _extract_symbols(
     body: List[ast.stmt],   # A module/class/function body
     bindings: "dict[str, dict]",  # The module's top-level import-binding table (for per-symbol used imports)
@@ -272,10 +289,21 @@ def _extract_symbols(
 ) -> List[ParsedSymbol]:  # Symbols declared directly in this body (with children)
     """Recursively decompose the def/class nodes in a body into `ParsedSymbol`s."""
     out: List[ParsedSymbol] = []
+    prev = None
     for node in body:
+        node_prev, prev = prev, node
         if not isinstance(node, _DEF_TYPES):
             continue
         qual = f"{parent_qual}.{node.name}" if parent_qual else node.name
+        if in_class and accessor_of(node, node_prev):  # the property's next accessor extends its symbol
+            s = out[-1]
+            s.decorators += [d for d in (_decorator_name(x) for x in node.decorator_list) if d]
+            s.calls += [c for c in _direct_calls(node) if c not in s.calls]
+            s.refs += [r for r in _direct_refs(node) if r not in s.refs]
+            s.import_bindings = _used_bindings(s.refs, bindings)
+            s.docstring = s.docstring or _docstring_first_line(node)
+            s.children += _extract_symbols(node.body, bindings, parent_qual=qual)
+            continue
         if isinstance(node, ast.ClassDef):
             kind = "class"
             fp, fpa = "", ""
@@ -424,6 +452,18 @@ def _toplevel_start(
     return start
 
 
+def source_lines(
+    text: str,               # Python source
+    keepends: bool = False,  # Keep each line's own ending
+) -> List[str]:  # Its lines as Python numbers them: line L is the result's [L - 1]
+    """Split source where the tokenizer counts lines -- at \\n, \\r\\n and \\r only. `str.splitlines` also
+    breaks at \\x0b, \\x0c, \\x1c-\\x1e, \\x85, \\u2028 and \\u2029, which a string literal may hold raw,
+    and every AST line number after one would then index the wrong line (a U+2029 in a find-bar's
+    literal once cut a method's last statement into a text region; design detail ed20aa51)."""
+    lines = io.StringIO(text, newline="").readlines()
+    return lines if keepends else [ln.rstrip("\r\n") for ln in lines]
+
+
 def _text_region_key(
     text: str,  # The region's verbatim text
 ) -> str:  # A best-effort stable anchor key
@@ -450,7 +490,7 @@ def parse_regions(
     as seams (canonical emit regenerates them); a comment touching the following node
     attaches to it. Raises `SyntaxError` on unparseable source (caller decides)."""
     tree = ast.parse(text)
-    lines = text.splitlines(keepends=True)  # 0-based; line L is lines[L-1]
+    lines = source_lines(text, keepends=True)  # 0-based; line L is lines[L-1]
     n = len(lines)
 
     def slice_text(start: int, end: int) -> str:  # 1-based inclusive -> verbatim, trailing blanks trimmed
