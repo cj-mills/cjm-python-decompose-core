@@ -1,9 +1,16 @@
-"""Imports-as-projection: deriving a module's canonical import block from bindings."""
+"""The import block: rendering bindings, and the element regime's composition of it (the union of
+the elements' bindings at its derived slot) -- where an import is derived since the verbs emit
+verbatim (design detail 25c1fadc, ruling D)."""
 
-from cjm_python_decompose_core.emit import (emit_module_from_nodes, module_used_bindings,
-                                            render_binding, render_import_block)
+from cjm_python_decompose_core.elements import compose_module, IMPORTS, lift_imports, string_reads
+from cjm_python_decompose_core.emit import (emit_module_from_nodes, render_binding,
+                                            render_import_block)
 from cjm_python_decompose_core.extract import decompose_text
-from cjm_python_decompose_core.parse import parse_module
+
+
+def _composed(src):
+    """The element regime's composition of a module text."""
+    return compose_module(lift_imports(src).elements)
 
 
 def _b(name, kind, module, imported="", alias="", level=0):
@@ -47,83 +54,63 @@ def test_render_import_block_wraps_long_from_lines_in_aligned_parens():
     compile(block, "m.py", "exec")
 
 
-def test_derived_block_is_faithful_and_prunes_dead_imports():
-    src = ("import os\n"
-           "from pathlib import Path\n"
-           "from typing import List\n"                    # never used -> pruned
-           "\n\n"
-           "def f(p: Path):\n"
-           "    return os.fspath(p)\n")
-    m = parse_module(src)
-    syms = [{"properties": {"import_bindings": s.import_bindings}} for s in m.symbols]
-    derived = render_import_block(
-        module_used_bindings(syms, {"properties": {"import_bindings": m.module_used_bindings}}))
-    assert "import os" in derived and "from pathlib import Path" in derived
-    assert "typing" not in derived                        # unused import auto-pruned
-
-
-def test_emit_module_derive_imports_prunes_dead_and_keeps_bodies():
-    src = ("import os\n"
-           "from typing import List, Dict\n"              # Dict unused -> pruned; List used
-           "from .util import helper\n"                   # unused -> pruned
-           "\n\n"
-           "def f(xs: List) -> str:\n"
-           "    return os.linesep.join(xs)\n")
-    d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", src)
-    nodes = [s.to_graph_node() for s in d.symbols] + [t.to_graph_node() for t in d.texts]
-    emitted = emit_module_from_nodes(nodes, module_node=d.module.to_graph_node(), derive_imports=True)
-    assert "import os" in emitted and "from typing import List" in emitted   # used imports kept
-    assert "Dict" not in emitted and "helper" not in emitted                 # dead imports pruned
-    assert "def f(xs: List) -> str:" in emitted and "os.linesep.join(xs)" in emitted  # body verbatim
-    compile(emitted, "m.py", "exec")                                          # valid Python
-
-
-def test_emit_module_default_is_verbatim_not_derived():
-    # the default path stays byte-exact (the flip is opt-in via derive_imports).
+def test_emit_module_from_nodes_is_verbatim():
+    # emit reassembles the regions as they are: an import no code reads is kept (the element
+    # regime decides what drops, at the write).
     src = "import os\nfrom typing import Dict\n\n\ndef f():\n    return os.getpid()\n"
     d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", src)
     nodes = [s.to_graph_node() for s in d.symbols] + [t.to_graph_node() for t in d.texts]
-    assert emit_module_from_nodes(nodes) == src           # unused Dict kept (verbatim, no pruning)
+    assert emit_module_from_nodes(nodes) == src
 
 
-def test_parameter_default_reference_is_not_pruned():
-    # A name used ONLY as a parameter DEFAULT is a real reference — pruning its
-    # import would raise NameError at def-evaluation time (the serve.py near-miss).
-    src = ("from .config import DEFAULT_DIR\n"
-           "\n\n"
-           "def serve(path: str = DEFAULT_DIR):\n"
-           "    return path\n")
-    d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", src)
-    nodes = [s.to_graph_node() for s in d.symbols] + [t.to_graph_node() for t in d.texts]
-    emitted = emit_module_from_nodes(nodes, module_node=d.module.to_graph_node(), derive_imports=True)
-    assert "from .config import DEFAULT_DIR" in emitted
+def _owner(src, name):
+    """The elements owning the binding of `name` after the lift ('imports' when none claims it)."""
+    return [e.qualname or e.kind for e in lift_imports(src).elements
+            if any(b.get("name") == name for b in e.bindings)]
 
 
-def test_docstring_lines_starting_with_from_survive_derive():
-    # A module-docstring LINE beginning with `from ` is prose, not an import — the
-    # AST-located strip must keep it (the devgraph.py/runtime.py near-miss).
+def test_a_parameter_default_or_a_parameter_name_claims_its_binding():
+    # A name used ONLY as a parameter DEFAULT is a real reference (NameError at def time otherwise);
+    # a parameter NAME is pytest's fixture request.
+    src = ("from conftest import db\n\nfrom .config import DEFAULT_DIR\n\n\n"
+           "def serve(path: str = DEFAULT_DIR):\n    return path\n\n\n"
+           "def test_db(db):\n    assert db\n")
+    assert _owner(src, "DEFAULT_DIR") == ["serve"] and _owner(src, "db") == ["test_db"]
+    assert _composed(src) == src
+
+
+def test_string_reads_name_the_fixture_reexport_and_annotation_channels():
+    src = ('import pytest\n\n__all__ = ["Path", "helper"]\n\n\n'
+           '@pytest.mark.usefixtures("db", "tmp")\n'
+           'def test_x(request) -> "Optional[Path]":\n'
+           '    x: "Dict" = request.getfixturevalue("cache")\n'
+           '    return x\n\n\n'
+           'def f(p: "Path") -> None:\n    pass\n')
+    reads = set()
+    for e in lift_imports(src).elements:
+        if e.kind != IMPORTS:
+            reads |= string_reads(e.text)
+    assert reads == {"Path", "helper", "db", "tmp", "Optional", "cache", "Dict"}
+    assert string_reads('x = "not a name at all"') == set()  # a plain string reads nothing
+    assert string_reads("pytestmark = pytest.mark.usefixtures('db')") == {"db"}
+
+
+def test_prose_lines_starting_with_from_survive_composition():
+    # A module-docstring LINE beginning with `from ` is prose, not an import.
     src = ('"""Build things\n'
            "from each pyproject) into the lists that extend_graph commits.\n"
            'import-shaped prose line too.\n'
-           '"""\n'
+           '"""\n\n'
            "import os\n"
            "\n\n"
            "def f():\n"
            "    return os.getpid()\n")
-    d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", src)
-    nodes = [s.to_graph_node() for s in d.symbols] + [t.to_graph_node() for t in d.texts]
-    emitted = emit_module_from_nodes(nodes, module_node=d.module.to_graph_node(), derive_imports=True)
-    assert "from each pyproject) into the lists" in emitted
-    assert "import-shaped prose line too." in emitted
-    assert "import os" in emitted
-    compile(emitted, "m.py", "exec")
+    assert _composed(src) == src
 
 
-def test_derived_import_block_lands_below_a_shebang_and_docstring():
-    # A shebang (or any comment header) ABOVE the module docstring is still the preamble:
-    # the derived import block must land after it, never at line 1 (regression: the
-    # cascade_manifests.py capture put the imports above `#!/usr/bin/env python3` and the
-    # docstring — the shebang died and the docstring became a bare expression).
+def test_the_import_block_lands_below_a_shebang_and_docstring():
+    # A shebang (or any comment header) ABOVE the module docstring is still the preamble: the
+    # composed import block lands after it, never at line 1 (the cascade_manifests.py regression).
     src = ("#!/usr/bin/env python3\n"
            '"""A script with a shebang.\n'
            '"""\n'
@@ -132,83 +119,47 @@ def test_derived_import_block_lands_below_a_shebang_and_docstring():
            "\n\n"
            "def f():\n"
            "    return os.getpid()\n")
-    d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", src)
-    nodes = [s.to_graph_node() for s in d.symbols] + [t.to_graph_node() for t in d.texts]
-    emitted = emit_module_from_nodes(nodes, module_node=d.module.to_graph_node(), derive_imports=True)
-    lines = emitted.splitlines()
-    assert lines[0] == "#!/usr/bin/env python3"
-    assert lines[1] == '"""A script with a shebang.'
+    lines = _composed(src).splitlines()
+    assert lines[0] == "#!/usr/bin/env python3" and lines[1] == '"""A script with a shebang.'
     assert lines.index("import os") > lines.index('"""', 2)
-    compile(emitted, "m.py", "exec")
-    # A comments-only header (no docstring) is a preamble too.
     src2 = "# -*- coding: utf-8 -*-\n# license header\n\nimport os\n\n\ndef g():\n    return os.sep\n"
-    d2 = decompose_text("pkg", "pkg/n.py", "/tmp/n.py", src2)
-    nodes2 = [s.to_graph_node() for s in d2.symbols] + [t.to_graph_node() for t in d2.texts]
-    emitted2 = emit_module_from_nodes(nodes2, module_node=d2.module.to_graph_node(), derive_imports=True)
-    assert emitted2.splitlines()[0] == "# -*- coding: utf-8 -*-"
-    assert "import os" in emitted2
-    compile(emitted2, "n.py", "exec")
+    out2 = _composed(src2)
+    assert out2.splitlines()[0] == "# -*- coding: utf-8 -*-" and "import os" in out2
+    compile(out2, "n.py", "exec")
 
 
-def test_coexisting_submodule_imports_both_survive_round_trip():
-    """import urllib.request + import urllib.error both bind `urllib` and both are
-    live — the emit must carry BOTH (regression: the one-descriptor-per-name table
-    kept only the last, silently dropping a used import at flip time)."""
-    text = (
-        "import urllib.error\n"
-        "import urllib.request\n"
-        "\n"
-        "\n"
-        "def fetch(url):\n"
-        "    try:\n"
-        "        return urllib.request.urlopen(url)\n"
-        "    except urllib.error.URLError:\n"
-        "        return None\n"
-    )
-    d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", text)
-    nodes = [s.to_graph_node() for s in d.symbols] + [x.to_graph_node() for x in d.texts]
-    emitted = emit_module_from_nodes(nodes, module_node=d.module.to_graph_node(),
-                                     derive_imports=True)
-    assert "import urllib.error" in emitted
-    assert "import urllib.request" in emitted
-    compile(emitted, "m.py", "exec")
+def test_coexisting_submodule_imports_both_survive_composition():
+    """import urllib.request + import urllib.error both bind `urllib` and both are live -- the
+    composition must carry BOTH (the one-descriptor-per-name table once kept only the last)."""
+    text = ("import urllib.error\n"
+            "import urllib.request\n"
+            "\n"
+            "\n"
+            "def fetch(url):\n"
+            "    try:\n"
+            "        return urllib.request.urlopen(url)\n"
+            "    except urllib.error.URLError:\n"
+            "        return None\n")
+    assert _composed(text) == text
 
 
 def test_rebinding_imports_still_supersede():
-    """Aliased / from-imports rebinding a name follow Python last-binding-wins —
-    only the LIVE binding is emitted."""
-    text = (
-        "from json import dumps\n"
-        "from simplejson import dumps\n"
-        "import numpy as np\n"
-        "import numpy.typing as np\n"
-        "\n"
-        "\n"
-        "def f(x):\n"
-        "    return dumps(x), np\n"
-    )
-    d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", text)
-    nodes = [s.to_graph_node() for s in d.symbols] + [x.to_graph_node() for x in d.texts]
-    emitted = emit_module_from_nodes(nodes, module_node=d.module.to_graph_node(),
-                                     derive_imports=True)
-    assert "from simplejson import dumps" in emitted
-    assert "from json import dumps" not in emitted
-    assert "import numpy.typing as np" in emitted
-    assert emitted.count("import numpy") == 1
+    """Aliased / from-imports rebinding a name follow Python last-binding-wins -- only the LIVE
+    binding is composed."""
+    text = ("from json import dumps\n"
+            "from simplejson import dumps\n"
+            "import numpy as np\n"
+            "import numpy.typing as np\n"
+            "\n"
+            "\n"
+            "def f(x):\n"
+            "    return dumps(x), np\n")
+    out = _composed(text)
+    assert "from simplejson import dumps" in out and "from json import dumps" not in out
+    assert "import numpy.typing as np" in out and out.count("import numpy") == 1
 
 
 def test_same_module_imported_twice_dedupes():
     """A literally duplicated plain import collapses to one statement."""
-    text = (
-        "import os\n"
-        "import os\n"
-        "\n"
-        "\n"
-        "def f():\n"
-        "    return os.getcwd()\n"
-    )
-    d = decompose_text("pkg", "pkg/m.py", "/tmp/m.py", text)
-    nodes = [s.to_graph_node() for s in d.symbols] + [x.to_graph_node() for x in d.texts]
-    emitted = emit_module_from_nodes(nodes, module_node=d.module.to_graph_node(),
-                                     derive_imports=True)
-    assert emitted.count("import os") == 1
+    out = _composed("import os\nimport os\n\n\ndef f():\n    return os.getcwd()\n")
+    assert out.count("import os") == 1

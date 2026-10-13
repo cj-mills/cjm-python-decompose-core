@@ -299,6 +299,54 @@ def element_names(
     return out
 
 
+# Calls whose string arguments name a pytest fixture: the fixture channel a ref walk cannot see.
+_FIXTURE_CALLS = frozenset({"usefixtures", "getfixturevalue"})
+
+
+def _string_names(
+    node: Optional[ast.AST],  # A string constant read where a name is meant (or None)
+) -> set:  # The names it holds
+    """A string that stands for a name or an expression: a fixture name, an `__all__` entry, a
+    forward-reference annotation ("Path", "Optional[Path]")."""
+    if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+        return set()
+    try:
+        expr = ast.parse(node.value.strip(), mode="eval")
+    except SyntaxError:
+        return set()
+    return {n.id for n in ast.walk(expr) if isinstance(n, ast.Name)}
+
+
+def string_reads(
+    text: str,  # An element's own text at depth 0
+) -> set:  # The names its strings stand for
+    """The names an element reads through a STRING -- a fixture string (`usefixtures("db")`,
+    `getfixturevalue("db")`), an `__all__` entry (a re-export), a string annotation. They claim no
+    binding (`element_names` decides ownership, which the element records hold); they keep a binding
+    alive: a binding its element stops reading is dropped only when no element reads its name by any
+    channel (design detail 25c1fadc, ruling D)."""
+    out = set()
+    for n in ast.walk(_parse_own(text)):
+        if isinstance(n, ast.arg):
+            out |= _string_names(n.annotation)
+        elif isinstance(n, ast.Call):
+            f = n.func
+            if (f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", "")) in _FIXTURE_CALLS:
+                for a in n.args:
+                    out |= _string_names(a)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out |= _string_names(n.returns)
+        elif isinstance(n, ast.AnnAssign):
+            out |= _string_names(n.annotation)
+        elif isinstance(n, (ast.Assign, ast.AugAssign)):
+            targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+            if any(isinstance(t, ast.Name) and t.id == "__all__" for t in targets) and \
+                    isinstance(n.value, (ast.List, ast.Tuple)):
+                for e in n.value.elts:
+                    out |= _string_names(e)
+    return out
+
+
 def binding_union(
     elements: List[CodeElement],  # A module's elements
 ) -> list:  # Every binding they own, deduplicated, in element order
@@ -385,23 +433,34 @@ def lift_imports(
     lines = text.split("\n")
     lifted = {ln for s in run for ln in range(s.lineno - 1, s.end_lineno)}
     kept = [n for n in range(len(lines)) if n not in lifted]
-    stripped = "\n".join(lines[n] for n in kept)
     table = _import_bindings(ast.Module(body=run, type_ignores=[]))
     before = [r for r in parse_regions(text)]
-    after = parse_regions(stripped)
     region_of = {}  # original 0-based line -> original region index
     for k, r in enumerate(before):
         for ln in range(r.start_line - 1, r.end_line):
             region_of[ln] = k
-    elements = decompose_elements(stripped)
+    # A comment preamble above the import run (a coding cookie, a license header) stays above it: it
+    # decomposes on its own, so it never becomes the leading comment of the def the lift leaves next
+    # to it, and the import block's slot follows it (`import_slot`).
+    first = min(lifted) if lifted else None
+    cut = sum(1 for n in kept if first is not None and n < first)
+    if not any(lines[n].lstrip().startswith("#") for n in kept[:cut]):
+        cut = 0
+    elements: List[CodeElement] = []
     origins: List[Optional[int]] = []
-    top = iter(after)
-    for e in elements:
-        if e.parent is None:
-            r = next(top)
-            origins.append(region_of.get(kept[r.start_line - 1]) if e.kind == "text" else None)
-        else:
-            origins.append(None)
+    for part in ((kept[:cut], kept[cut:]) if cut else (kept,)):
+        part_text = "\n".join(lines[n] for n in part)
+        base = len(elements)
+        part_elements = decompose_elements(part_text)
+        top = iter(parse_regions(part_text))
+        for e in part_elements:
+            if e.parent is None:
+                r = next(top)
+                origins.append(region_of.get(part[r.start_line - 1]) if e.kind == "text" else None)
+            else:
+                e.parent += base
+                origins.append(None)
+            elements.append(e)
     holding = sorted({region_of[ln] for ln in lifted})
     keeping = {o for o in origins if o is not None}
     emptied = [k for k in holding if k not in keeping]

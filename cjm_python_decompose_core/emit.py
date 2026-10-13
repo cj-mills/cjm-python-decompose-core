@@ -14,11 +14,10 @@ necessarily byte-identical to a non-PEP-8 original.
 """
 
 import ast
-import re
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from .parse import emit_regions, source_lines, SourceRegion
+from .parse import emit_regions, SourceRegion
 
 _SYMBOL_LABELS = {"CodeSymbol"}
 _TEXT_LABELS = {"CodeText"}
@@ -124,10 +123,10 @@ def render_import_block(
     bindings: List[Dict[str, Any]],  # Import-binding descriptors (per-symbol + module-level, unioned)
     local: frozenset = frozenset(),  # The module's sibling module names (`sibling_modules`): their own section
 ) -> str:  # The canonical import block text ("" when none)
-    """Derive a module's canonical import block from its used import bindings.
+    """Render a module's canonical import block from its import bindings (the element regime's
+    composition: the union of its elements' bindings, `elements.compose_module`).
 
-    The imports-as-projection emit: the block is GENERATED from the bindings the module's
-    symbols actually use (so an unused import is auto-pruned), deterministically ordered —
+    The block is GENERATED from the bindings, deterministically ordered —
     `from __future__` first, then isort-style SECTIONS separated by a blank line (stdlib,
     third-party, local siblings, relative — classified via `sys.stdlib_module_names` and `local`), each section's
     `import` statements before its `from` imports, all sorted by module; same-source `from`
@@ -169,52 +168,6 @@ def render_import_block(
         if lines:
             sections.append(lines)
     return "\n\n".join("\n".join(lines) for lines in sections)
-
-
-def synth_import(local_name: str, import_name: str) -> Dict[str, Any]:
-    """A synthetic `from <import_name> import <local_name>` binding (USES-derived).
-
-    For an INTRA-corpus reference that has no import statement of its own — a symbol that
-    referenced a same-module sibling and then MOVED, so the sibling is now cross-module.
-    Absolute form (the target module's dotted import name); the round-trip bar is semantic."""
-    return {"name": local_name, "kind": "from", "module": import_name,
-            "imported": local_name, "alias": "", "level": 0}
-
-
-def module_used_bindings(
-    symbol_nodes: Any,         # The module's CodeSymbol nodes (objects or wire dicts) — carry per-symbol import_bindings
-    module_node: Any = None,   # The CodeModule node (carries module-level import_bindings) — optional
-    uses_derived: Any = None,  # USES-derived synthetic bindings (intra-corpus imports the frozen bindings can't carry)
-) -> List[Dict[str, Any]]:  # The unioned import bindings this module needs
-    """Union of every contained symbol's import bindings + the module-level ones (+ any
-    USES-derived synthetics for names no binding covers).
-
-    This is the input to `render_import_block`: which imports the module's CURRENT members
-    actually use. The frozen per-symbol bindings carry external + already-cross-module deps;
-    `uses_derived` adds the imports that only become cross-module AFTER a move (a former
-    same-module reference) — together they make the relocate ZERO-RESIDUAL."""
-    def get(node: Any, key: str) -> List[Dict[str, Any]]:
-        if node is None:
-            return []
-        if isinstance(node, dict):
-            return (node.get("properties") or node).get(key, []) or []
-        props = getattr(node, "properties", None)       # graph node object carrying a props dict
-        if isinstance(props, dict):
-            return props.get(key, []) or []
-        return getattr(node, key, []) or []              # plain object with the attr directly
-
-    out: List[Dict[str, Any]] = []
-    if module_node is not None:
-        out.extend(get(module_node, "import_bindings"))
-    for s in symbol_nodes:
-        out.extend(get(s, "import_bindings"))
-    if uses_derived:                                     # add only names no explicit binding covers
-        covered = {b.get("name") for b in out}
-        for b in uses_derived:
-            if b.get("name") not in covered:
-                out.append(b)
-                covered.add(b.get("name"))
-    return out
 
 
 def _region_from_node(
@@ -278,8 +231,7 @@ def _looks_like_docstring(text: str) -> bool:
 
     True when the region opens with a string literal (the module docstring), when comment
     lines — a shebang, an encoding cookie, a license header — lead into one, or when the
-    region is comments only. AST-located like `_strip_import_lines`: the first STATEMENT
-    decides, so `#!/usr/bin/env python3` above a docstring no longer reads as "not a
+    region is comments only. AST-located: the first STATEMENT decides, so `#!/usr/bin/env python3` above a docstring no longer reads as "not a
     docstring" (the cascade_manifests.py capture landed the import block at line 1, above
     the shebang AND the docstring — the shebang stopped working and the docstring became
     a bare expression; housekeeping sitting 2026-09-23). A region `ast.parse` rejects
@@ -297,82 +249,14 @@ def _looks_like_docstring(text: str) -> bool:
             and isinstance(first.value.value, str))
 
 
-_IMPORT_LINE = re.compile(r"\s*(from|import)\s")
-
-
-def _strip_import_lines(text: str) -> str:  # The region text with top-level import statements removed
-    """Drop top-level `import`/`from ... import` statements (paren/backslash continuations
-    included) from a text region, keeping any non-import lines — so a region that mixes
-    imports with a constant keeps the constant while the imports are regenerated.
-
-    AST-located: only lines spanned by a real top-level Import/ImportFrom statement drop —
-    a DOCSTRING line that merely starts with `from ...` survives (the line-regex fallback,
-    for a region that doesn't parse standalone, would eat it), and an import nested in an
-    `if`/`try` is conditional logic, not a derivable binding, so it stays too."""
-    try:
-        tree = ast.parse(text)
-    except SyntaxError:
-        return _strip_import_lines_regex(text)
-    drop: set = set()
-    for node in tree.body:
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            drop.update(range(node.lineno, (node.end_lineno or node.lineno) + 1))
-    return "\n".join(ln for i, ln in enumerate(source_lines(text), 1) if i not in drop)
-
-
-def _strip_import_lines_regex(text: str) -> str:  # The pre-AST fallback (unparseable region)
-    """Line-regex import stripping — only for a region `ast.parse` rejects."""
-    lines = text.splitlines()
-    out: List[str] = []
-    i = 0
-    while i < len(lines):
-        ln = lines[i]
-        if _IMPORT_LINE.match(ln):
-            depth = ln.count("(") - ln.count(")")
-            cont = ln.rstrip().endswith("\\")
-            i += 1
-            while (depth > 0 or cont) and i < len(lines):
-                depth += lines[i].count("(") - lines[i].count(")")
-                cont = lines[i].rstrip().endswith("\\")
-                i += 1
-            continue
-        out.append(ln)
-        i += 1
-    return "\n".join(out)
-
-
 def emit_module_from_nodes(
-    nodes: Any,  # The module's CodeSymbol (incl. methods, for bindings) + CodeText nodes
-    module_node: Any = None,        # The CodeModule node (module-level import bindings) — for derive_imports
-    derive_imports: bool = False,   # Regenerate the import block from bindings instead of the verbatim region
-    uses_derived: Any = None,       # USES-derived synthetic imports (zero-residual move) — for derive_imports
-) -> str:  # The reconstructed canonical `.py` source
-    """Reassemble a module's canonical `.py` source from its graph nodes (the round-trip).
-
-    With `derive_imports`, the verbatim import region is replaced by the block DERIVED from
-    the module's used import bindings (imports-as-projection): unused imports drop, ordering
-    is canonical, and a moved symbol's imports recompute — at the SEMANTIC fidelity bar
-    (bodies byte-exact, the import set equal/canonical), not byte-identity."""
-    regions = regions_from_nodes(nodes)
-    if not derive_imports:
-        return emit_regions(regions)
-    symbols = [n for n in nodes if _label_of(n) == "CodeSymbol"]
-    block = render_import_block(module_used_bindings(symbols, module_node, uses_derived))
-    rebuilt: List[SourceRegion] = []
-    for r in regions:
-        if r.kind == "text":
-            kept = _strip_import_lines(r.text).strip("\n")
-            if kept.strip():
-                rebuilt.append(SourceRegion(kind="text", text=kept, start_line=0, end_line=0,
-                                            region_key=getattr(r, "region_key", "")))
-        else:
-            rebuilt.append(r)
-    if block:
-        imp = SourceRegion(kind="text", text=block, start_line=0, end_line=0, region_key="imports")
-        pos = 1 if (rebuilt and rebuilt[0].kind == "text"
-                    and _looks_like_docstring(rebuilt[0].text)) else 0
-        rebuilt.insert(pos, imp)
-    return emit_regions(rebuilt)
+    nodes: Any,  # The module's CodeSymbol + CodeText nodes (objects or wire dicts)
+) -> str:  # The reconstructed `.py` source
+    """Reassemble a module's `.py` source from its graph nodes (the round-trip): its ordered
+    top-level regions, VERBATIM, with the seams canonical. The import block is whatever the
+    module's imports region holds -- in the element regime, the block composed from the elements'
+    bindings, which is where an import is derived (design detail 25c1fadc, ruling D)."""
+    return emit_regions(regions_from_nodes(nodes))
 
 
 def nodes_for_module(
